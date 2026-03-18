@@ -58,6 +58,8 @@ class FlowScriptSession:
         # Ordered list of conversation items for this session
         self._items: list[dict[str, Any]] = []
         self._rebuild_items()
+        # Start temporal session
+        self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
@@ -79,9 +81,16 @@ class FlowScriptSession:
 
     async def get_items(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Get conversation items, optionally limited."""
-        if limit is not None:
-            return list(self._items[-limit:])
-        return list(self._items)
+        items = self._items[-limit:] if limit is not None else self._items
+        # Touch retrieved nodes — retrieval is engagement
+        touched_ids = []
+        for ref in self._memory.nodes:
+            ext = ref.node.ext or {}
+            if ext.get("oai_session_id") == self.session_id:
+                touched_ids.append(ref.id)
+        if touched_ids:
+            self._memory._touch_nodes_session_scoped(touched_ids)
+        return list(items)
 
     async def add_items(self, items: list[dict[str, Any]]) -> None:
         """Add conversation items to the session."""
@@ -141,6 +150,10 @@ class FlowScriptSession:
     def save(self) -> None:
         """Persist to disk."""
         self._memory.save()
+
+    def close(self) -> None:
+        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+        return self._memory.session_wrap()
 
 
 def _extract_item_content(item: dict[str, Any]) -> str | None:

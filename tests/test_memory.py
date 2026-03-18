@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from flowscript_agents import Memory, NodeRef
-from flowscript_ldp.ir import IR, Node, NodeType, Provenance
+from flowscript_agents.types import IR, Node, NodeType, Provenance
 
 
 class TestNodeCreation:
@@ -198,17 +198,18 @@ class TestSerialization:
         mem = Memory()
         mem.thought("test")
         data = mem.to_json()
-        assert "nodes" in data
-        assert "relationships" in data
-        assert "states" in data
-        assert len(data["nodes"]) == 1
+        assert "flowscript_memory" in data
+        assert "ir" in data
+        assert "temporal" in data
+        assert "config" in data
+        assert len(data["ir"]["nodes"]) == 1
 
     def test_to_json_string(self):
         mem = Memory()
         mem.thought("test")
         s = mem.to_json_string()
         parsed = json.loads(s)
-        assert len(parsed["nodes"]) == 1
+        assert len(parsed["ir"]["nodes"]) == 1
 
     def test_from_json_roundtrip(self):
         mem = Memory()

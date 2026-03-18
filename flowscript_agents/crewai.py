@@ -45,6 +45,8 @@ class FlowScriptStorage:
         # Index: record_id → {node_id, record_data}
         self._records: dict[str, _RecordEntry] = {}
         self._rebuild_index()
+        # Start temporal session
+        self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
@@ -160,7 +162,12 @@ class FlowScriptStorage:
                 results.append((entry, score))
 
         results.sort(key=lambda x: -x[1])
-        return [(e.to_dict(), s) for e, s in results[:limit]]
+        final = results[:limit]
+        # Touch found nodes — search engagement drives temporal graduation
+        touched_ids = [e.node_id for e, _ in final]
+        if touched_ids:
+            self._memory._touch_nodes_session_scoped(touched_ids)
+        return [(e.to_dict(), s) for e, s in final]
 
     def delete(
         self,
@@ -253,6 +260,7 @@ class FlowScriptStorage:
         """Get a record by ID."""
         entry = self._records.get(record_id)
         if entry:
+            self._memory._touch_nodes_session_scoped([entry.node_id])
             return entry.to_dict()
         return None
 
@@ -360,6 +368,10 @@ class FlowScriptStorage:
     def save_to_disk(self) -> None:
         """Persist to disk."""
         self._memory.save()
+
+    def close(self) -> None:
+        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+        return self._memory.session_wrap()
 
 
 class _RecordEntry:

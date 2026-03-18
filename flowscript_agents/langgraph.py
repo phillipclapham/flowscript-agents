@@ -58,6 +58,8 @@ class FlowScriptStore(BaseStore):
         self._items: dict[tuple[tuple[str, ...], str], _StoredItem] = {}
         # Rebuild index from loaded memory
         self._rebuild_index()
+        # Start temporal session (resets touch dedup)
+        self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
@@ -111,6 +113,8 @@ class FlowScriptStore(BaseStore):
         stored = self._items.get((op.namespace, op.key))
         if stored is None:
             return None
+        # Touch: retrieving an item is engagement
+        self._memory._touch_nodes_session_scoped([stored.node_id])
         return Item(
             namespace=stored.namespace,
             key=stored.key,
@@ -207,8 +211,18 @@ class FlowScriptStore(BaseStore):
         # Sort by score descending, then by recency descending
         results.sort(key=lambda x: (-(x.score or 0), -x.updated_at.timestamp()))
 
-        # Apply offset and limit
-        return results[op.offset : op.offset + op.limit]
+        final = results[op.offset : op.offset + op.limit]
+
+        # Touch found nodes — search engagement drives temporal graduation
+        touched_ids = []
+        for item in final:
+            stored = self._items.get((item.namespace, item.key))
+            if stored:
+                touched_ids.append(stored.node_id)
+        if touched_ids:
+            self._memory._touch_nodes_session_scoped(touched_ids)
+
+        return final
 
     def _handle_list_namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
         namespaces: set[tuple[str, ...]] = set()
@@ -240,6 +254,10 @@ class FlowScriptStore(BaseStore):
     def save(self) -> None:
         """Persist the store to disk."""
         self._memory.save()
+
+    def close(self) -> None:
+        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+        return self._memory.session_wrap()
 
 
 class _StoredItem:

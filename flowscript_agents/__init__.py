@@ -15,7 +15,33 @@ Usage:
     print(mem.query.tensions())
 """
 
-from .memory import Memory, NodeRef
+from .memory import (
+    Memory,
+    MemoryOptions,
+    NodeRef,
+    TemporalConfig,
+    TemporalMeta,
+    TemporalTierConfig,
+    DormancyConfig,
+    GardenReport,
+    PruneReport,
+    SessionStartResult,
+    SessionEndResult,
+    SessionWrapResult,
+)
 
-__version__ = "0.1.0"
-__all__ = ["Memory", "NodeRef"]
+__version__ = "0.1.1"
+__all__ = [
+    "Memory",
+    "MemoryOptions",
+    "NodeRef",
+    "TemporalConfig",
+    "TemporalMeta",
+    "TemporalTierConfig",
+    "DormancyConfig",
+    "GardenReport",
+    "PruneReport",
+    "SessionStartResult",
+    "SessionEndResult",
+    "SessionWrapResult",
+]

@@ -45,6 +45,8 @@ class FlowScriptMemoryService:
         else:
             self._memory = Memory()
         self._file_path = file_path
+        # Start temporal session
+        self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
@@ -101,8 +103,10 @@ class FlowScriptMemoryService:
         Returns a dict matching ADK's SearchMemoryResponse shape:
         {"memories": [{"content": ..., "id": ..., "author": ..., "timestamp": ...}, ...]}
         """
-        # Search by content match
+        # Search by content match — touch found nodes (engagement signal)
         matches = self._memory.find_nodes(query)
+        if matches:
+            self._memory._touch_nodes_session_scoped([ref.id for ref in matches[:10]])
 
         # Also check if query relates to FlowScript query operations
         memories = []
@@ -221,6 +225,10 @@ class FlowScriptMemoryService:
     def save(self) -> None:
         """Persist to disk."""
         self._memory.save()
+
+    def close(self) -> None:
+        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+        return self._memory.session_wrap()
 
 
 def _extract_event_content(event: Any) -> str | None:
