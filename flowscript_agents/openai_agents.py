@@ -23,7 +23,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .memory import Memory
+from .memory import Memory, NodeRef
 
 
 class FlowScriptSession:
@@ -64,6 +64,22 @@ class FlowScriptSession:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    def resolve(self, content: str) -> NodeRef | None:
+        """Resolve a conversation item to a FlowScript NodeRef by content match.
+
+        Searches for a node whose content contains the given string.
+        Returns the first match, or None if not found. Use the returned
+        NodeRef to build relationships for semantic queries::
+
+            ref = session.resolve("chose Redis for sessions")
+            if ref:
+                ref.decide(rationale="Speed critical, native TTL")
+
+            session.memory.query.blocked()
+        """
+        matches = self._memory.find_nodes(content)
+        return matches[0] if matches else None
 
     def _rebuild_items(self) -> None:
         """Rebuild item list from loaded memory nodes."""

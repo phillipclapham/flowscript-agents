@@ -149,3 +149,47 @@ class TestMemoryAccess:
     async def test_session_id_stored(self):
         session = FlowScriptSession("my-session")
         assert session.session_id == "my-session"
+
+
+class TestResolve:
+    """Test resolve() bridge from conversation content to FlowScript NodeRef."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_existing_content(self):
+        session = FlowScriptSession("sess1")
+        await session.add_items([{"role": "assistant", "content": "Use Redis for sessions"}])
+        ref = session.resolve("Redis")
+        assert ref is not None
+        assert "Redis" in ref.content
+
+    def test_resolve_nonexistent_returns_none(self):
+        session = FlowScriptSession("sess1")
+        assert session.resolve("nonexistent content xyz") is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_enables_semantic_relationships(self):
+        session = FlowScriptSession("sess1")
+        await session.add_items([
+            {"role": "assistant", "content": "Use Redis for sessions"},
+            {"role": "assistant", "content": "Use Redis for caching too"},
+        ])
+        db = session.resolve("sessions")
+        cache = session.resolve("caching")
+        assert db is not None and cache is not None
+
+        cache.causes(db)
+        db.tension_with(cache, axis="simplicity vs resilience")
+
+        tensions = session.memory.query.tensions()
+        assert tensions.metadata["total_tensions"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_resolve_enables_blocking(self):
+        session = FlowScriptSession("sess1")
+        await session.add_items([{"role": "assistant", "content": "Deploy Redis cluster"}])
+        ref = session.resolve("Deploy Redis")
+        assert ref is not None
+        ref.block(reason="Waiting on Sentinel")
+
+        blocked = session.memory.query.blocked()
+        assert len(blocked.blockers) >= 1

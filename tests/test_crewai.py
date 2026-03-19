@@ -187,3 +187,44 @@ class TestReset:
         ])
         storage.reset(scope_prefix="/old")
         assert storage.count() == 1
+
+
+class TestResolve:
+    """Test resolve() bridge from CrewAI records to FlowScript NodeRef."""
+
+    def test_resolve_existing_record(self):
+        storage = FlowScriptStorage()
+        storage.save([_make_record(id="rec-1", content="Use Redis")])
+        ref = storage.resolve("rec-1")
+        assert ref is not None
+        assert "Redis" in ref.content
+
+    def test_resolve_nonexistent_returns_none(self):
+        storage = FlowScriptStorage()
+        assert storage.resolve("nonexistent") is None
+
+    def test_resolve_enables_semantic_relationships(self):
+        storage = FlowScriptStorage()
+        storage.save([
+            _make_record(id="db", content="Use Redis for sessions"),
+            _make_record(id="cache", content="Use Redis for caching"),
+        ])
+        db = storage.resolve("db")
+        cache = storage.resolve("cache")
+        assert db is not None and cache is not None
+
+        cache.causes(db)
+        db.tension_with(cache, axis="simplicity vs resilience")
+
+        tensions = storage.memory.query.tensions()
+        assert tensions.metadata["total_tensions"] >= 1
+
+    def test_resolve_enables_blocking(self):
+        storage = FlowScriptStorage()
+        storage.save([_make_record(id="deploy", content="Deploy Redis")])
+        ref = storage.resolve("deploy")
+        assert ref is not None
+        ref.block(reason="Waiting on Sentinel")
+
+        blocked = storage.memory.query.blocked()
+        assert len(blocked.blockers) >= 1

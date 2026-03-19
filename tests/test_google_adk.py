@@ -143,3 +143,43 @@ class TestQueryIntegration:
         )
         # Should include tension summary
         assert any("tension" in str(m).lower() for m in result["memories"])
+
+
+class TestResolve:
+    """Test resolve() bridge from ADK node IDs to FlowScript NodeRef."""
+
+    def test_resolve_existing_node(self):
+        service = FlowScriptMemoryService()
+        ref = service.memory.thought("Use Redis")
+        resolved = service.resolve(ref.id)
+        assert resolved is not None
+        assert "Redis" in resolved.content
+
+    def test_resolve_nonexistent_returns_none(self):
+        service = FlowScriptMemoryService()
+        assert service.resolve("nonexistent-id") is None
+
+    def test_resolve_enables_semantic_relationships(self):
+        service = FlowScriptMemoryService()
+        db = service.memory.thought("Use Redis for sessions")
+        cache = service.memory.thought("Use Redis for caching")
+
+        db_ref = service.resolve(db.id)
+        cache_ref = service.resolve(cache.id)
+        assert db_ref is not None and cache_ref is not None
+
+        cache_ref.causes(db_ref)
+        db_ref.tension_with(cache_ref, axis="simplicity vs resilience")
+
+        tensions = service.memory.query.tensions()
+        assert tensions.metadata["total_tensions"] >= 1
+
+    def test_resolve_enables_blocking(self):
+        service = FlowScriptMemoryService()
+        ref = service.memory.thought("Deploy Redis cluster")
+        resolved = service.resolve(ref.id)
+        assert resolved is not None
+        resolved.block(reason="Waiting on Sentinel setup")
+
+        blocked = service.memory.query.blocked()
+        assert len(blocked.blockers) >= 1

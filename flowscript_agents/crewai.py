@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from .memory import Memory
+from .memory import Memory, NodeRef
 
 
 class FlowScriptStorage:
@@ -34,6 +34,12 @@ class FlowScriptStorage:
 
     Access FlowScript's semantic queries via the .memory property:
         storage.memory.query.tensions()
+        storage.memory.query.blocked()
+
+    For semantic queries, use resolve() to get a NodeRef::
+
+        ref = storage.resolve("record_123")
+        ref.block(reason="Waiting on API keys")
         storage.memory.query.blocked()
     """
 
@@ -51,6 +57,28 @@ class FlowScriptStorage:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    def resolve(self, record_id: str) -> NodeRef | None:
+        """Resolve a stored record to a FlowScript NodeRef for semantic operations.
+
+        Returns None if the record doesn't exist. Use the returned NodeRef to
+        build relationships that power FlowScript's semantic queries::
+
+            ref1 = storage.resolve("decision_123")
+            ref2 = storage.resolve("concern_456")
+            if ref1 and ref2:
+                ref1.tension_with(ref2, axis="speed vs safety")
+                ref1.decide(rationale="Accepted the tradeoff")
+
+            storage.memory.query.tensions()
+        """
+        entry = self._records.get(record_id)
+        if entry is None:
+            return None
+        try:
+            return self._memory.ref(entry.node_id)
+        except KeyError:
+            return None
 
     def _rebuild_index(self) -> None:
         for ref in self._memory.nodes:

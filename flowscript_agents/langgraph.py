@@ -31,7 +31,7 @@ from langgraph.store.base import (
     SearchOp,
 )
 
-from .memory import Memory
+from .memory import Memory, NodeRef
 
 
 class FlowScriptStore(BaseStore):
@@ -46,6 +46,18 @@ class FlowScriptStore(BaseStore):
     - Items are stored as nodes with namespace encoded in provenance
     - Search uses FlowScript's content matching
     - Full FlowScript query engine available via .memory.query
+
+    For semantic queries (tensions, blocked, why, alternatives, whatIf),
+    use resolve() to get a NodeRef and build relationships::
+
+        db = store.resolve(("arch", "decisions"), "db_choice")
+        cache = store.resolve(("arch", "decisions"), "cache_choice")
+        cache.causes(db)
+        db.tension_with(cache, axis="simplicity vs resilience")
+        db.decide(rationale="Redis for both", on="2026-03-18")
+
+        # Now semantic queries find these relationships
+        tensions = store.memory.query.tensions()
     """
 
     def __init__(self, file_path: str | None = None) -> None:
@@ -70,6 +82,31 @@ class FlowScriptStore(BaseStore):
             blocked = store.memory.query.blocked()
         """
         return self._memory
+
+    def resolve(self, namespace: tuple[str, ...], key: str) -> NodeRef | None:
+        """Resolve a stored item to a FlowScript NodeRef for semantic operations.
+
+        Returns None if the item doesn't exist. Use the returned NodeRef to
+        build relationships that power FlowScript's semantic queries::
+
+            db = store.resolve(("arch", "decisions"), "db_choice")
+            cache = store.resolve(("arch", "decisions"), "cache_choice")
+            if db and cache:
+                cache.causes(db)
+                db.tension_with(cache, axis="simplicity vs resilience")
+                db.decide(rationale="Redis for both")
+
+            # Semantic queries now find these
+            store.memory.query.tensions()
+            store.memory.query.blocked()
+        """
+        stored = self._items.get((namespace, key))
+        if stored is None:
+            return None
+        try:
+            return self._memory.ref(stored.node_id)
+        except KeyError:
+            return None
 
     def _rebuild_index(self) -> None:
         """Rebuild the namespace/key index from loaded memory nodes."""

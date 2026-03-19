@@ -22,7 +22,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
-from .memory import Memory
+from .memory import Memory, NodeRef
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,27 @@ class FlowScriptMemoryService:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    def resolve(self, node_id: str) -> NodeRef | None:
+        """Resolve a node ID to a FlowScript NodeRef for semantic operations.
+
+        Node IDs appear in search_memory results. Use the returned NodeRef to
+        build relationships that power FlowScript's semantic queries::
+
+            results = await service.search_memory(
+                app_name="myapp", user_id="user1", query="database"
+            )
+            for mem in results["memories"]:
+                ref = service.resolve(mem["id"])
+                if ref:
+                    ref.block(reason="Waiting on approval")
+
+            service.memory.query.blocked()
+        """
+        try:
+            return self._memory.ref(node_id)
+        except KeyError:
+            return None
 
     async def add_session_to_memory(self, session: Any) -> None:
         """Extract reasoning from an ADK session and add to memory.

@@ -230,6 +230,39 @@ All adapters expose `.memory` for direct FlowScript query access.
 
 ---
 
+## Session Lifecycle
+
+Memory gets smarter when you use it. Every query touches returned nodes — incrementing frequency and updating timestamps. Nodes that keep getting queried graduate through tiers (`current` → `developing` → `proven` → `foundation`). Dormant nodes get pruned to an audit trail.
+
+### Standalone Memory
+
+```python
+mem = Memory.load_or_create("./memory.json")
+
+# Start of session: query to orient
+blockers = mem.query.blocked()    # touches returned nodes
+tensions = mem.query.tensions()   # touches returned nodes
+
+# ... agent does work, adds decisions, queries reasoning ...
+
+# End of session: prune dormant + save
+mem.prune()   # dormant nodes → audit trail
+mem.save()    # persist to disk
+```
+
+### Per-Framework Guidance
+
+| Framework | When to prune/save | How |
+|:----------|:-------------------|:----|
+| **LangGraph** | After your graph run completes | `store.memory.prune(); store.memory.save()` |
+| **CrewAI** | After crew kickoff finishes | `storage.memory.prune(); storage.memory.save()` |
+| **Google ADK** | After runner session ends | `service.memory.prune(); service.memory.save()` |
+| **OpenAI Agents** | After conversation turn/session | `session.memory.prune(); session.memory.save()` |
+
+All adapters auto-save on `put`/`save`/`add_items` operations. Explicit `prune() + save()` at session boundaries keeps the memory garden healthy.
+
+---
+
 ## Ecosystem
 
 - **[flowscript-core](https://www.npmjs.com/package/flowscript-core)** — TypeScript SDK with `Memory` class, `asTools()` (12 OpenAI-format tools), token budgeting, audit trail

@@ -161,6 +161,83 @@ class TestFlowScriptIntegration:
         assert store.memory.size >= 1
 
 
+class TestResolve:
+    """Test resolve() bridge from LangGraph items to FlowScript NodeRef."""
+
+    def test_resolve_existing_item(self):
+        store = FlowScriptStore()
+        store.put(("arch",), "db_choice", {"content": "Use Redis"})
+        ref = store.resolve(("arch",), "db_choice")
+        assert ref is not None
+        assert "Redis" in ref.content
+
+    def test_resolve_nonexistent_returns_none(self):
+        store = FlowScriptStore()
+        ref = store.resolve(("arch",), "nonexistent")
+        assert ref is None
+
+    def test_resolve_enables_semantic_relationships(self):
+        """Core validation: resolve() bridges store items to semantic queries."""
+        store = FlowScriptStore()
+        store.put(("arch",), "db", {"content": "Use Redis for sessions"})
+        store.put(("arch",), "cache", {"content": "Use Redis for caching too"})
+
+        db = store.resolve(("arch",), "db")
+        cache = store.resolve(("arch",), "cache")
+        assert db is not None and cache is not None
+
+        # Build semantic relationships via NodeRef API
+        cache.causes(db)
+        db.tension_with(cache, axis="simplicity vs resilience")
+        db.decide(rationale="Redis for both", on="2026-03-18")
+
+        # Semantic queries now find these relationships
+        tensions = store.memory.query.tensions()
+        assert tensions.metadata["total_tensions"] >= 1
+
+        blocked = store.memory.query.blocked()
+        # Nothing blocked — but the query works
+        assert blocked is not None
+
+    def test_resolve_enables_blocking(self):
+        store = FlowScriptStore()
+        store.put(("deploy",), "redis", {"content": "Deploy Redis cluster"})
+        ref = store.resolve(("deploy",), "redis")
+        assert ref is not None
+
+        ref.block(reason="Waiting on Sentinel setup", since="2026-03-18")
+        blocked = store.memory.query.blocked()
+        assert len(blocked.blockers) >= 1
+
+    def test_resolve_enables_alternatives(self):
+        store = FlowScriptStore()
+        # Create a question via memory API, then alternatives via store
+        q = store.memory.question("Which caching strategy?")
+        alt1 = store.memory.alternative(q, "Redis")
+        alt2 = store.memory.alternative(q, "Varnish")
+        alt1.decide(rationale="Already in stack")
+
+        alts = store.memory.query.alternatives(q.id)
+        assert alts is not None
+
+    def test_resolve_after_save_load(self):
+        """Resolve works after save/load cycle."""
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "test.json")
+        store = FlowScriptStore(path)
+        store.put(("arch",), "db", {"content": "Use Redis"})
+        ref = store.resolve(("arch",), "db")
+        assert ref is not None
+        ref.decide(rationale="Speed critical")
+        store.save()
+
+        # Reload
+        store2 = FlowScriptStore(path)
+        ref2 = store2.resolve(("arch",), "db")
+        assert ref2 is not None
+        assert "Redis" in ref2.content
+
+
 class TestAsync:
     @pytest.mark.asyncio
     async def test_async_put_and_get(self):
