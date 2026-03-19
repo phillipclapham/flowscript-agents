@@ -85,8 +85,8 @@ class FlowScriptMemoryTools:
         """Persist memory to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End session: prune dormant, save, return lifecycle stats."""
+    def close(self):
+        """End session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 
@@ -138,7 +138,8 @@ class _StoreMemoryTool(_BaseFSTool):
         if category:
             ref.node.ext = ref.node.ext or {}
             ref.node.ext["smolagents_category"] = category
-        return f"Stored in memory: [{category}] {content[:80]}..."
+        preview = content[:80] + ("..." if len(content) > 80 else "")
+        return f"Stored in memory: [{category}] {preview}"
 
 
 class _RecallMemoryTool(_BaseFSTool):
@@ -165,7 +166,7 @@ class _RecallMemoryTool(_BaseFSTool):
         if not matches:
             return "No relevant memories found."
 
-        self._memory._touch_nodes_session_scoped([ref.id for ref in matches])
+        self._memory.touch_nodes_session_scoped([ref.id for ref in matches])
 
         lines = []
         for ref in matches:

@@ -194,7 +194,7 @@ class FlowScriptStorage:
         # Touch found nodes — search engagement drives temporal graduation
         touched_ids = [e.node_id for e, _ in final]
         if touched_ids:
-            self._memory._touch_nodes_session_scoped(touched_ids)
+            self._memory.touch_nodes_session_scoped(touched_ids)
         return [(e.to_dict(), s) for e, s in final]
 
     def delete(
@@ -288,7 +288,7 @@ class FlowScriptStorage:
         """Get a record by ID."""
         entry = self._records.get(record_id)
         if entry:
-            self._memory._touch_nodes_session_scoped([entry.node_id])
+            self._memory.touch_nodes_session_scoped([entry.node_id])
             return entry.to_dict()
         return None
 
@@ -397,8 +397,8 @@ class FlowScriptStorage:
         """Persist to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+    def close(self):
+        """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 

@@ -633,10 +633,22 @@ class Memory:
         if meta.frequency >= threshold and meta.tier != "foundation":
             self._graduate(node_id, meta)
 
-    def _touch_nodes_session_scoped(self, ids: list[str]) -> None:
-        """Touch nodes with session-scoped dedup (for query results)."""
+    def touch_nodes_session_scoped(self, ids: list[str]) -> None:
+        """Touch nodes with session-scoped dedup (max +1 frequency per session).
+
+        Call this when retrieving nodes to track engagement. Drives temporal
+        graduation (current → developing → proven → foundation).
+
+        Session-scoped means the same node is only touched once per session,
+        preventing within-session frequency inflation from repeated queries.
+        Use this in adapters for query-driven touches. Use touch_nodes() for
+        explicit touches that should always increment.
+        """
         for node_id in ids:
             self._touch_node(node_id, session_scoped=True)
+
+    # Backward compat alias
+    _touch_nodes_session_scoped = touch_nodes_session_scoped
 
     # -- Graduation --
 
@@ -1046,7 +1058,7 @@ class _QueryProxy:
         # Filter empty strings and touch
         valid_ids = [i for i in ids if i]
         if valid_ids:
-            self._memory._touch_nodes_session_scoped(valid_ids)
+            self._memory.touch_nodes_session_scoped(valid_ids)
 
     def why(self, node_id: str, **kwargs: Any) -> Any:
         result = self._get_engine().why(node_id, **kwargs)

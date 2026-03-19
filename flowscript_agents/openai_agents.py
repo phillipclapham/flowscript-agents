@@ -105,7 +105,7 @@ class FlowScriptSession:
             if ext.get("oai_session_id") == self.session_id:
                 touched_ids.append(ref.id)
         if touched_ids:
-            self._memory._touch_nodes_session_scoped(touched_ids)
+            self._memory.touch_nodes_session_scoped(touched_ids)
         return list(items)
 
     async def add_items(self, items: list[dict[str, Any]]) -> None:
@@ -167,8 +167,8 @@ class FlowScriptSession:
         """Persist to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+    def close(self):
+        """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 

@@ -151,7 +151,7 @@ class FlowScriptStore(BaseStore):
         if stored is None:
             return None
         # Touch: retrieving an item is engagement
-        self._memory._touch_nodes_session_scoped([stored.node_id])
+        self._memory.touch_nodes_session_scoped([stored.node_id])
         return Item(
             namespace=stored.namespace,
             key=stored.key,
@@ -257,7 +257,7 @@ class FlowScriptStore(BaseStore):
             if stored:
                 touched_ids.append(stored.node_id)
         if touched_ids:
-            self._memory._touch_nodes_session_scoped(touched_ids)
+            self._memory.touch_nodes_session_scoped(touched_ids)
 
         return final
 
@@ -292,8 +292,8 @@ class FlowScriptStore(BaseStore):
         """Persist the store to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+    def close(self):
+        """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 

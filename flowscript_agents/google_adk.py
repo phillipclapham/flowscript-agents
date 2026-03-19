@@ -127,7 +127,7 @@ class FlowScriptMemoryService:
         # Search by content match — touch found nodes (engagement signal)
         matches = self._memory.find_nodes(query)
         if matches:
-            self._memory._touch_nodes_session_scoped([ref.id for ref in matches[:10]])
+            self._memory.touch_nodes_session_scoped([ref.id for ref in matches[:10]])
 
         # Also check if query relates to FlowScript query operations
         memories = []
@@ -247,8 +247,8 @@ class FlowScriptMemoryService:
         """Persist to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End the session: prune dormant nodes, save, capture lifecycle stats."""
+    def close(self):
+        """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 

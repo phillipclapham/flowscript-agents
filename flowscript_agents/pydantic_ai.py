@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass  # RunContext[FlowScriptDeps] would go here when pydantic-ai is installed
 
 from .memory import Memory, NodeRef
 
@@ -110,7 +113,7 @@ class FlowScriptDeps:
         """
         matches = self._memory.find_nodes(query)[:limit]
         if matches:
-            self._memory._touch_nodes_session_scoped([ref.id for ref in matches])
+            self._memory.touch_nodes_session_scoped([ref.id for ref in matches])
 
         results = []
         for ref in matches:
@@ -150,8 +153,8 @@ class FlowScriptDeps:
         """Persist memory to disk."""
         self._memory.save()
 
-    def close(self) -> None:
-        """End session: prune dormant nodes, save, return lifecycle stats."""
+    def close(self):
+        """End session: prune dormant nodes, save. Returns SessionWrapResult."""
         return self._memory.session_wrap()
 
 
@@ -176,6 +179,10 @@ def create_memory_tools() -> list:
         - query_tensions: Find active tradeoffs and tensions
         - query_blocked: Find blockers and their downstream impact
     """
+
+    # Note: ctx typed as Any to avoid requiring pydantic-ai at import time.
+    # At runtime, ctx is RunContext[FlowScriptDeps]. Pydantic AI's @agent.tool()
+    # wires dependency injection by positional convention, not type annotation.
 
     async def store_memory(ctx: Any, content: str, category: str = "observation") -> str:
         """Store an observation, decision, or insight in persistent memory.
