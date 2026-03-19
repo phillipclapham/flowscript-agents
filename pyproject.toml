@@ -25,6 +25,8 @@ keywords = [
     "smolagents",
     "llamaindex",
     "llama-index",
+    "haystack",
+    "camel-ai",
     "llm",
     "ai-agents"
 ]
@@ -51,6 +53,8 @@ openai-agents = ["openai-agents>=0.1.0"]
 pydantic-ai = ["pydantic-ai>=0.1.0"]
 smolagents = ["smolagents>=1.0.0"]
 llamaindex = ["llama-index-core>=0.12.0"]
+haystack = ["haystack-ai>=2.0.0"]
+camel-ai = ["camel-ai>=0.2.0"]
 all = [
     "langgraph>=0.2.0",
     "langgraph-checkpoint>=2.0.0",
@@ -60,6 +64,8 @@ all = [
     "pydantic-ai>=0.1.0",
     "smolagents>=1.0.0",
     "llama-index-core>=0.12.0",
+    "haystack-ai>=2.0.0",
+    "camel-ai>=0.2.0",
 ]
 dev = [
     "pytest>=8.0",
