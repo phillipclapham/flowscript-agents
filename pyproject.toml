@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "flowscript-agents"
 version = "0.1.1"
-description = "FlowScript integrations for AI agent frameworks. Decision intelligence memory for LangGraph, LangChain, CrewAI, Google ADK, OpenAI Agents SDK, Pydantic AI, and smolagents."
+description = "FlowScript integrations for AI agent frameworks. Decision intelligence memory for LangGraph, LangChain, CrewAI, Google ADK, OpenAI Agents SDK, Pydantic AI, smolagents, and LlamaIndex."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -23,6 +23,8 @@ keywords = [
     "openai-agents",
     "pydantic-ai",
     "smolagents",
+    "llamaindex",
+    "llama-index",
     "llm",
     "ai-agents"
 ]
@@ -48,6 +50,7 @@ google-adk = ["google-adk>=1.0.0"]
 openai-agents = ["openai-agents>=0.1.0"]
 pydantic-ai = ["pydantic-ai>=0.1.0"]
 smolagents = ["smolagents>=1.0.0"]
+llamaindex = ["llama-index-core>=0.12.0"]
 all = [
     "langgraph>=0.2.0",
     "langgraph-checkpoint>=2.0.0",
@@ -56,6 +59,7 @@ all = [
     "openai-agents>=0.1.0",
     "pydantic-ai>=0.1.0",
     "smolagents>=1.0.0",
+    "llama-index-core>=0.12.0",
 ]
 dev = [
     "pytest>=8.0",
