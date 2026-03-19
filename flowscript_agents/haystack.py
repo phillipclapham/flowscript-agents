@@ -29,6 +29,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from haystack.dataclasses import ChatMessage as HaystackChatMessage
+
 from .memory import Memory, NodeRef
 
 
@@ -198,25 +200,32 @@ class FlowScriptMemoryStore:
                 [ref.id for ref, _ in matches]
             )
 
-        # Return as ChatMessage-compatible dicts
-        results = []
+        # Return as Haystack ChatMessage objects (Agent calls .text on results)
+        results: list[HaystackChatMessage] = []
         for ref, score in matches:
             node = ref.node
             ext = node.ext or {}
             meta = self._memory.temporal_map.get(ref.id)
 
-            results.append({
-                "content": node.content,
-                "role": ext.get("haystack_role", "assistant"),
-                "meta": {
-                    "memory_id": ext.get("haystack_memory_id", ref.id),
-                    "user_id": ext.get("haystack_user_id"),
-                    "tier": meta.tier if meta else "current",
-                    "frequency": meta.frequency if meta else 1,
-                    "score": score,
-                    "source": "flowscript",
-                },
-            })
+            role = ext.get("haystack_role", "assistant")
+            memory_meta = {
+                "memory_id": ext.get("haystack_memory_id", ref.id),
+                "user_id": ext.get("haystack_user_id"),
+                "tier": meta.tier if meta else "current",
+                "frequency": meta.frequency if meta else 1,
+                "score": score,
+                "source": "flowscript",
+            }
+
+            if role == "user":
+                msg = HaystackChatMessage.from_user(node.content)
+            else:
+                msg = HaystackChatMessage.from_assistant(node.content, meta=memory_meta)
+            # Attach meta to user messages too
+            if role == "user":
+                msg.meta.update(memory_meta)
+
+            results.append(msg)
 
         return results
 

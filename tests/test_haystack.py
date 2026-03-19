@@ -3,6 +3,7 @@
 import os
 import pytest
 from flowscript_agents.haystack import FlowScriptMemoryStore
+from haystack.dataclasses import ChatMessage as HaystackChatMessage
 
 
 class TestFlowScriptMemoryStore:
@@ -23,6 +24,15 @@ class TestAddMemories:
         store.add_memories(messages=[
             {"role": "user", "content": "What database should we use?"},
             {"role": "assistant", "content": "I recommend PostgreSQL."},
+        ])
+        assert store.memory.size == 2
+
+    def test_stores_haystack_chat_messages(self):
+        """Real Haystack Agent passes ChatMessage objects, not dicts."""
+        store = FlowScriptMemoryStore()
+        store.add_memories(messages=[
+            HaystackChatMessage.from_user("What database?"),
+            HaystackChatMessage.from_assistant("I recommend PostgreSQL."),
         ])
         assert store.memory.size == 2
 
@@ -80,7 +90,8 @@ class TestSearchMemories:
         ])
         results = store.search_memories(query="Redis caching")
         assert len(results) >= 1
-        assert "Redis" in results[0]["content"]
+        assert isinstance(results[0], HaystackChatMessage)
+        assert "Redis" in results[0].text
 
     def test_returns_all_without_query(self):
         store = FlowScriptMemoryStore()
@@ -103,7 +114,7 @@ class TestSearchMemories:
         )
         results = store.search_memories(user_id="u1")
         assert len(results) == 1
-        assert "User 1" in results[0]["content"]
+        assert "User 1" in results[0].text
 
     def test_respects_top_k(self):
         store = FlowScriptMemoryStore()
@@ -121,9 +132,9 @@ class TestSearchMemories:
             user_id="u1",
         )
         results = store.search_memories(query="important insight")
-        assert results[0]["meta"]["source"] == "flowscript"
-        assert "tier" in results[0]["meta"]
-        assert "frequency" in results[0]["meta"]
+        assert results[0].meta["source"] == "flowscript"
+        assert "tier" in results[0].meta
+        assert "frequency" in results[0].meta
 
     def test_search_touches_nodes(self):
         store = FlowScriptMemoryStore()

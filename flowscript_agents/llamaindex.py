@@ -1,7 +1,7 @@
 """
 FlowScript LlamaIndex Integration.
 
-Implements LlamaIndex's BaseMemoryBlock protocol, making FlowScript memory
+Implements LlamaIndex's BaseMemoryBlock, making FlowScript memory
 available as a composable memory block for LlamaIndex agents.
 
 Usage:
@@ -24,21 +24,20 @@ Note: Requires llama-index-core: pip install flowscript-agents[llamaindex]
 
 from __future__ import annotations
 
-import json
-from typing import Any, Generic, List, Optional, TypeVar
+from typing import Any, List, Optional
+
+from pydantic import ConfigDict, PrivateAttr
+
+from llama_index.core.memory import BaseMemoryBlock
 
 from .memory import Memory, NodeRef
 
-# Type variable for BaseMemoryBlock generic — we return str
-T = TypeVar("T")
 
-
-class FlowScriptMemoryBlock:
+class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
     """LlamaIndex BaseMemoryBlock backed by FlowScript reasoning memory.
 
-    Implements the BaseMemoryBlock[str] protocol (duck-typed, no inheritance
-    needed). Returns FlowScript memory context as formatted text that gets
-    injected into agent prompts via LlamaIndex's memory system.
+    Inherits from BaseMemoryBlock[str] for full compatibility with
+    LlamaIndex's Memory system (Memory.from_defaults, FunctionAgent, etc.).
 
     The block participates in LlamaIndex's flush pipeline:
     - Short-term messages overflow → _aput() stores them as FlowScript nodes
@@ -56,14 +55,13 @@ class FlowScriptMemoryBlock:
             ref.decide(rationale="Speed critical")
     """
 
-    # BaseMemoryBlock protocol fields
-    name: str = "flowscript_reasoning"
-    description: str = (
-        "Long-term reasoning memory with temporal intelligence. "
-        "Tracks decision patterns, tensions, and blockers across sessions."
-    )
-    priority: int = 1  # Can be truncated if needed (0 = never truncate)
-    accept_short_term_memory: bool = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # Private attributes (not Pydantic fields — internal state)
+    _memory: Memory = PrivateAttr()
+    _file_path: Optional[str] = PrivateAttr(default=None)
+    _max_tokens: int = PrivateAttr(default=4000)
+    _include_queries: bool = PrivateAttr(default=True)
 
     def __init__(
         self,
@@ -72,6 +70,7 @@ class FlowScriptMemoryBlock:
         name: str = "flowscript_reasoning",
         max_tokens: int = 4000,
         include_queries: bool = True,
+        **kwargs: Any,
     ) -> None:
         """Initialize FlowScript memory block.
 
@@ -82,15 +81,24 @@ class FlowScriptMemoryBlock:
             include_queries: Whether to append semantic query results
                 (tensions, blocked) to the context output.
         """
-        self.name = name
+        super().__init__(
+            name=name,
+            description=(
+                "Long-term reasoning memory with temporal intelligence. "
+                "Tracks decision patterns, tensions, and blockers across sessions."
+            ),
+            priority=1,
+            accept_short_term_memory=True,
+            **kwargs,
+        )
         self._max_tokens = max_tokens
         self._include_queries = include_queries
+        self._file_path = file_path
 
         if file_path:
             self._memory = Memory.load_or_create(file_path)
         else:
             self._memory = Memory()
-        self._file_path = file_path
         self._memory.session_start()
 
     @property
@@ -111,7 +119,7 @@ class FlowScriptMemoryBlock:
 
     async def _aget(
         self,
-        messages: list[dict[str, Any]] | None = None,
+        messages: Optional[List[Any]] = None,
         **block_kwargs: Any,
     ) -> str:
         """Retrieve memory context for prompt injection.
@@ -122,7 +130,7 @@ class FlowScriptMemoryBlock:
         - Semantic query results (tensions, blocked) if enabled
 
         Args:
-            messages: Current conversation messages (for relevance matching).
+            messages: Current conversation messages (ChatMessage objects).
             **block_kwargs: Additional keyword arguments.
 
         Returns:
@@ -183,15 +191,15 @@ class FlowScriptMemoryBlock:
 
         return "\n".join(lines)
 
-    async def _aput(self, messages: list[dict[str, Any]]) -> None:
+    async def _aput(self, messages: List[Any]) -> None:
         """Store flushed messages as FlowScript nodes.
 
         Called by LlamaIndex's Memory when short-term messages overflow.
         Each message becomes a FlowScript node with metadata about role
-        and position.
+        and position. Handles both ChatMessage objects and plain dicts.
 
         Args:
-            messages: List of ChatMessage-like dicts with 'role' and 'content'.
+            messages: List of ChatMessage objects (or dicts for testing).
         """
         prev_ref = None
         for msg in messages:
@@ -307,12 +315,12 @@ def _extract_message_content(msg: Any) -> str | None:
             return " ".join(texts) if texts else None
         return None
 
-    # ChatMessage object
+    # ChatMessage object — .content is a property returning str
     content = getattr(msg, "content", None)
     if isinstance(content, str):
         return content if content else None
 
-    # Content blocks on ChatMessage
+    # Fallback: content blocks on ChatMessage
     blocks = getattr(msg, "blocks", None)
     if blocks:
         texts = []

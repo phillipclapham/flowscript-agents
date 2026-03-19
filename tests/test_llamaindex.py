@@ -6,6 +6,8 @@ import tempfile
 import pytest
 
 from flowscript_agents.llamaindex import FlowScriptMemoryBlock
+from llama_index.core.memory import BaseMemoryBlock, Memory
+from llama_index.core.base.llms.types import ChatMessage
 
 
 class TestFlowScriptMemoryBlock:
@@ -34,6 +36,20 @@ class TestFlowScriptMemoryBlock:
         assert hasattr(block, "priority")
         assert hasattr(block, "accept_short_term_memory")
         assert block.accept_short_term_memory is True
+
+    def test_is_instance_of_base_memory_block(self):
+        """Critical: Pydantic validates isinstance — duck-typing doesn't work."""
+        block = FlowScriptMemoryBlock()
+        assert isinstance(block, BaseMemoryBlock)
+
+    def test_accepted_by_memory_from_defaults(self):
+        """Critical: Memory.from_defaults must accept our block without error."""
+        block = FlowScriptMemoryBlock()
+        memory = Memory.from_defaults(
+            session_id="test",
+            memory_blocks=[block],
+        )
+        assert memory is not None
 
 
 class TestAget:
@@ -141,6 +157,31 @@ class TestAput:
             {"role": "user", "content": "Test message"},
         ])
         assert os.path.exists(path)
+
+    @pytest.mark.asyncio
+    async def test_stores_chat_message_objects(self):
+        """Real LlamaIndex integration uses ChatMessage, not dicts."""
+        block = FlowScriptMemoryBlock()
+        await block._aput([
+            ChatMessage(role="user", content="What database?"),
+            ChatMessage(role="assistant", content="I recommend PostgreSQL."),
+        ])
+        assert block.memory.size == 2
+        refs = list(block.memory.nodes)
+        assert refs[0].node.ext["llamaindex_role"] == "user"
+        assert refs[1].node.ext["llamaindex_role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_chat_message_role_enum_extracted(self):
+        """MessageRole enum .value must be extracted, not the enum itself."""
+        block = FlowScriptMemoryBlock()
+        await block._aput([
+            ChatMessage(role="user", content="Test role extraction"),
+        ])
+        ref = list(block.memory.nodes)[0]
+        role = ref.node.ext["llamaindex_role"]
+        assert isinstance(role, str)
+        assert role == "user"
 
 
 class TestAtruncate:

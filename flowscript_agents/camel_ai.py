@@ -264,6 +264,14 @@ class FlowScriptCamelMemory:
         """Store a single record."""
         self.write_records([record])
 
+    def clean_tool_calls(self) -> None:
+        """Remove tool call messages from memory.
+
+        Called by ChatAgent after tool execution. No-op for FlowScript
+        since we store reasoning patterns, not raw tool call messages.
+        """
+        pass
+
     def clear(self) -> None:
         """Clear all stored records."""
         # Remove all nodes
