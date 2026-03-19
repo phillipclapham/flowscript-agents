@@ -162,7 +162,19 @@ class _RecallMemoryTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, query: str, limit: int = 5) -> str:
-        matches = self._memory.find_nodes(query)[:limit]
+        # Word-level search: split query into words, match nodes containing
+        # any query word, score by proportion of words matched.
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
+        scored: list[tuple] = []
+        if query_words:
+            for node in self._memory._nodes.values():
+                content_lower = node.content.lower()
+                hits = sum(1 for w in query_words if w in content_lower)
+                if hits > 0:
+                    score = hits / len(query_words)
+                    scored.append((NodeRef(self._memory, node), score))
+            scored.sort(key=lambda x: -x[1])
+        matches = [ref for ref, _ in scored[:limit]]
         if not matches:
             return "No relevant memories found."
 

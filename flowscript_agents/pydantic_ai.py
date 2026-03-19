@@ -104,6 +104,11 @@ class FlowScriptDeps:
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Search memory for relevant content.
 
+        Uses word-level matching: splits query into words, matches nodes
+        containing any query word, scores by proportion of words matched.
+        This handles natural language queries that won't match as exact
+        substrings in longer content.
+
         Args:
             query: Text to search for.
             limit: Maximum results to return.
@@ -111,7 +116,17 @@ class FlowScriptDeps:
         Returns:
             List of dicts with 'content', 'id', 'tier', 'frequency' keys.
         """
-        matches = self._memory.find_nodes(query)[:limit]
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
+        scored: list[tuple[NodeRef, float]] = []
+        if query_words:
+            for node in self._memory._nodes.values():
+                content_lower = node.content.lower()
+                hits = sum(1 for w in query_words if w in content_lower)
+                if hits > 0:
+                    score = hits / len(query_words)
+                    scored.append((NodeRef(self._memory, node), score))
+            scored.sort(key=lambda x: -x[1])
+        matches = [ref for ref, _ in scored[:limit]]
         if matches:
             self._memory.touch_nodes_session_scoped([ref.id for ref in matches])
 

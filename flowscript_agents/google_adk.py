@@ -124,14 +124,28 @@ class FlowScriptMemoryService:
         Returns a dict matching ADK's SearchMemoryResponse shape:
         {"memories": [{"content": ..., "id": ..., "author": ..., "timestamp": ...}, ...]}
         """
-        # Search by content match — touch found nodes (engagement signal)
-        matches = self._memory.find_nodes(query)
+        # Word-level search: split query into words, match nodes containing
+        # any query word, score by proportion of words matched. This handles
+        # natural language queries like "database connection pooling" that won't
+        # match as exact substrings in longer content.
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
+        scored_matches: list[tuple[NodeRef, float]] = []
+        if query_words:
+            for node in self._memory._nodes.values():
+                content_lower = node.content.lower()
+                hits = sum(1 for w in query_words if w in content_lower)
+                if hits > 0:
+                    score = hits / len(query_words)
+                    scored_matches.append((NodeRef(self._memory, node), score))
+            scored_matches.sort(key=lambda x: -x[1])
+
+        matches = [ref for ref, _ in scored_matches[:10]]
         if matches:
-            self._memory.touch_nodes_session_scoped([ref.id for ref in matches[:10]])
+            self._memory.touch_nodes_session_scoped([ref.id for ref in matches])
 
         # Also check if query relates to FlowScript query operations
         memories = []
-        for ref in matches[:10]:  # limit results
+        for ref, score in scored_matches[:10]:  # limit results
             node = ref.node
             ext = node.ext or {}
 
