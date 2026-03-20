@@ -22,12 +22,16 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
+from google.adk.memory import BaseMemoryService as _ADKBaseMemoryService
+from google.adk.memory.base_memory_service import SearchMemoryResponse
+from google.adk.memory.memory_entry import MemoryEntry
+
 from .memory import Memory, NodeRef
 
 logger = logging.getLogger(__name__)
 
 
-class FlowScriptMemoryService:
+class FlowScriptMemoryService(_ADKBaseMemoryService):
     """Google ADK BaseMemoryService backed by FlowScript reasoning memory.
 
     Implements the two required ADK methods:
@@ -118,11 +122,10 @@ class FlowScriptMemoryService:
         app_name: str,
         user_id: str,
         query: str,
-    ) -> dict[str, Any]:
+    ) -> SearchMemoryResponse:
         """Search FlowScript memory for relevant content.
 
-        Returns a dict matching ADK's SearchMemoryResponse shape:
-        {"memories": [{"content": ..., "id": ..., "author": ..., "timestamp": ...}, ...]}
+        Returns ADK SearchMemoryResponse with MemoryEntry objects.
         """
         # Word-level search: split query into words, match nodes containing
         # any query word, score by proportion of words matched. This handles
@@ -155,16 +158,16 @@ class FlowScriptMemoryService:
             if ext.get("adk_user") and ext["adk_user"] != user_id:
                 continue
 
-            memories.append({
-                "content": _make_content(node.content),
-                "id": node.id,
-                "author": ext.get("adk_author", "memory"),
-                "timestamp": node.provenance.timestamp,
-                "custom_metadata": {
+            memories.append(MemoryEntry(
+                content=_make_content(node.content),
+                id=node.id,
+                author=ext.get("adk_author", "memory"),
+                timestamp=node.provenance.timestamp,
+                custom_metadata={
                     "node_type": node.type.value,
                     "source": "flowscript",
                 },
-            })
+            ))
 
         # Add FlowScript query insights if relevant
         query_lower = query.lower()
@@ -178,12 +181,12 @@ class FlowScriptMemoryService:
                         chain_text = " → ".join(
                             getattr(n, "content", str(n)) for n in chain
                         )
-                        memories.append({
-                            "content": _make_content(f"Causal chain: {chain_text}"),
-                            "id": f"why-{ref.id[:8]}",
-                            "author": "flowscript-query",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                        memories.append(MemoryEntry(
+                            content=_make_content(f"Causal chain: {chain_text}"),
+                            id=f"why-{ref.id[:8]}",
+                            author="flowscript-query",
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        ))
                 except Exception:
                     logger.debug("FlowScript query failed during search enrichment", exc_info=True)
 
@@ -191,14 +194,14 @@ class FlowScriptMemoryService:
             try:
                 tensions = self._memory.query.tensions()
                 if tensions.metadata.get("total_tensions", 0) > 0:
-                    memories.append({
-                        "content": _make_content(
+                    memories.append(MemoryEntry(
+                        content=_make_content(
                             f"Active tensions: {json.dumps(asdict(tensions), default=str)}"
                         ),
-                        "id": "tensions-summary",
-                        "author": "flowscript-query",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
+                        id="tensions-summary",
+                        author="flowscript-query",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ))
             except Exception:
                 pass
 
@@ -206,18 +209,18 @@ class FlowScriptMemoryService:
             try:
                 blocked = self._memory.query.blocked()
                 if blocked.blockers:
-                    memories.append({
-                        "content": _make_content(
+                    memories.append(MemoryEntry(
+                        content=_make_content(
                             f"Blocked items: {json.dumps(asdict(blocked), default=str)}"
                         ),
-                        "id": "blocked-summary",
-                        "author": "flowscript-query",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
+                        id="blocked-summary",
+                        author="flowscript-query",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ))
             except Exception:
                 pass
 
-        return {"memories": memories}
+        return SearchMemoryResponse(memories=memories)
 
     # -- Optional methods --
 

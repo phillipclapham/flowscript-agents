@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
+from camel.memories.base import AgentMemory as _CamelAgentMemory
+
 from .memory import Memory, NodeRef
 
 
@@ -35,9 +37,13 @@ class MemoryRecord:
     camel-ai is not installed. When camel-ai IS installed,
     real MemoryRecord objects from camel.memories.records work
     transparently.
+
+    Includes role_at_backend for compatibility with ChatAgent's
+    memory setter, which categorizes records by backend role.
     """
     content: str
     role: str = "assistant"
+    role_at_backend: str = "assistant"
     uuid: str = ""
     timestamp: float = 0.0
     agent_id: str = ""
@@ -52,7 +58,7 @@ class ContextRecord:
     timestamp: float = 0.0
 
 
-class FlowScriptCamelMemory:
+class FlowScriptCamelMemory(_CamelAgentMemory):
     """CAMEL-AI AgentMemory backed by FlowScript reasoning memory.
 
     Implements the AgentMemory protocol (duck-typed) for CAMEL's ChatAgent.
@@ -168,6 +174,7 @@ class FlowScriptCamelMemory:
             record = MemoryRecord(
                 content=ref.content,
                 role=role,
+                role_at_backend=role,
                 uuid=ref.id[:8],
                 timestamp=datetime.now(timezone.utc).timestamp(),
                 agent_id=self._agent_id or "",
@@ -227,18 +234,33 @@ class FlowScriptCamelMemory:
         """Store records from agent conversation.
 
         Called by ChatAgent after each turn. Each record becomes a
-        FlowScript node.
+        FlowScript node. Handles both real CAMEL MemoryRecord objects
+        (record.message.content) and our duck-typed MemoryRecord
+        (record.content).
 
         Args:
             records: List of MemoryRecord-like objects.
         """
         prev_ref = None
         for record in records:
-            content = getattr(record, "content", str(record))
+            # Real CAMEL MemoryRecord: record.message.content
+            # Duck-typed MemoryRecord: record.content
+            msg = getattr(record, "message", None)
+            if msg is not None:
+                content = getattr(msg, "content", None) or str(msg)
+            else:
+                content = getattr(record, "content", str(record))
             if not content:
                 continue
 
-            role = getattr(record, "role", "assistant")
+            # Real CAMEL: record.role_at_backend (enum)
+            # Duck-typed: record.role (str)
+            role_backend = getattr(record, "role_at_backend", None)
+            if role_backend is not None:
+                # OpenAIBackendRole enum → string value
+                role = getattr(role_backend, "value", str(role_backend))
+            else:
+                role = getattr(record, "role", "assistant")
             agent_id = getattr(record, "agent_id", self._agent_id or "")
 
             ref = self._memory.thought(content)
@@ -273,11 +295,24 @@ class FlowScriptCamelMemory:
         pass
 
     def clear(self) -> None:
-        """Clear all stored records."""
-        # Remove all nodes
-        node_ids = [ref.id for ref in self._memory.nodes]
-        for nid in node_ids:
-            self._memory.remove_node(nid)
+        """Intentional no-op: preserve reasoning memory across clears.
+
+        ChatAgent calls clear() during init and memory reassignment.
+        This is correct for chat history buffers (FIFO, vector stores)
+        but destructive for reasoning memory where nodes represent
+        graduated knowledge with temporal intelligence.
+
+        FlowScript's content-addressable design means the system message
+        written after clear() will either deduplicate (same content → same
+        node ID) or create a new node alongside existing ones.
+
+        This is a genuine differentiator: CAMEL's built-in memories
+        lose all history on clear. FlowScript preserves what matters.
+        """
+        # No-op: reasoning memory persists through agent lifecycle changes.
+        # Nodes carry graduated temporal state (tier, frequency) that
+        # represents learning — destroying it defeats the purpose.
+        pass
 
     def get_context(self) -> tuple[list[dict[str, Any]], int]:
         """Get chat context for the agent.

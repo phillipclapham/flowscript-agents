@@ -23,10 +23,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional
 
-if TYPE_CHECKING:
-    pass  # RunContext[FlowScriptDeps] would go here when pydantic-ai is installed
+from pydantic_ai import RunContext
 
 from .memory import Memory, NodeRef
 
@@ -195,11 +194,7 @@ def create_memory_tools() -> list:
         - query_blocked: Find blockers and their downstream impact
     """
 
-    # Note: ctx typed as Any to avoid requiring pydantic-ai at import time.
-    # At runtime, ctx is RunContext[FlowScriptDeps]. Pydantic AI's @agent.tool()
-    # wires dependency injection by positional convention, not type annotation.
-
-    async def store_memory(ctx: Any, content: str, category: str = "observation") -> str:
+    async def store_memory(ctx: RunContext[FlowScriptDeps], content: str, category: str = "observation") -> str:
         """Store an observation, decision, or insight in persistent memory.
 
         Args:
@@ -213,7 +208,7 @@ def create_memory_tools() -> list:
         ref = ctx.deps.store(content, category=category)
         return f"Stored: {ref.id[:8]}... [{category}]"
 
-    async def recall_memory(ctx: Any, query: str, limit: int = 5) -> str:
+    async def recall_memory(ctx: RunContext[FlowScriptDeps], query: str, limit: int = 5) -> str:
         """Search persistent memory for relevant past context.
 
         Args:
@@ -232,7 +227,7 @@ def create_memory_tools() -> list:
             lines.append(f"[{r['tier']}, freq={r['frequency']}] {r['content']}")
         return "\n".join(lines)
 
-    async def query_tensions(ctx: Any) -> str:
+    async def query_tensions(ctx: RunContext[FlowScriptDeps]) -> str:
         """Find active tradeoffs and tensions in memory.
 
         Returns:
@@ -243,7 +238,7 @@ def create_memory_tools() -> list:
             return "No tensions found. Use store.resolve() to build tension relationships."
         return str(tensions)
 
-    async def query_blocked(ctx: Any) -> str:
+    async def query_blocked(ctx: RunContext[FlowScriptDeps]) -> str:
         """Find blockers and their downstream impact.
 
         Returns:

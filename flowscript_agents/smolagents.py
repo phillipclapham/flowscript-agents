@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from smolagents import Tool as _SmolBaseTool
+
 from .memory import Memory, NodeRef
 
 
@@ -90,13 +92,12 @@ class FlowScriptMemoryTools:
         return self._memory.session_wrap()
 
 
-class _BaseFSTool:
+class _BaseFSTool(_SmolBaseTool):
     """Base for FlowScript smolagents tools.
 
-    Implements the smolagents Tool protocol without importing smolagents
-    (which may not be installed). smolagents uses duck-typing for tools —
-    any object with name, description, inputs, output_type, and forward()
-    works as a tool.
+    Inherits from smolagents.Tool for isinstance compatibility.
+    Each subclass sets name, description, inputs, output_type as
+    class attributes and implements forward().
     """
 
     name: str = ""
@@ -105,13 +106,11 @@ class _BaseFSTool:
     output_type: str = "string"
 
     def __init__(self, memory: Memory) -> None:
+        super().__init__()
         self._memory = memory
 
     def forward(self, **kwargs: Any) -> str:
         raise NotImplementedError
-
-    def __call__(self, **kwargs: Any) -> str:
-        return self.forward(**kwargs)
 
 
 class _StoreMemoryTool(_BaseFSTool):
