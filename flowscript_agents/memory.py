@@ -107,6 +107,14 @@ class PruneReport:
 
 
 @dataclass
+class UpdateResult:
+    """Result of update_node() — includes metadata for sidecar coordination."""
+    ref: Any  # NodeRef (forward reference)
+    old_id: str  # the original node ID before update
+    merged: bool  # True if update content matched an existing node (collision merge)
+
+
+@dataclass
 class SessionStartResult:
     summary: str
     garden: GardenReport
@@ -520,6 +528,11 @@ class Memory:
         rel_type: RelationType,
         axis_label: Optional[str] = None,
     ) -> None:
+        # Validate both nodes exist — prevents orphaned relationships from stale NodeRefs
+        if source_id not in self._nodes:
+            raise KeyError(f"Source node {source_id!r} does not exist (was it pruned?)")
+        if target_id not in self._nodes:
+            raise KeyError(f"Target node {target_id!r} does not exist (was it pruned?)")
         raw = f"{rel_type.value}:{source_id}:{target_id}"
         if axis_label:
             raw += f":{axis_label}"
@@ -569,6 +582,9 @@ class Memory:
         state_type: StateType,
         fields: Optional[StateFields] = None,
     ) -> None:
+        # Validate node exists — prevents orphaned states from stale NodeRefs
+        if node_id not in self._nodes:
+            raise KeyError(f"Node {node_id!r} does not exist (was it pruned?)")
         raw = f"{state_type.value}:{node_id}"
         state_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -945,9 +961,20 @@ class Memory:
 
         self._file_path = str(path.resolve())
 
-    # -- Internal helpers --
+    # -- Public accessors (used by MCP server and external tools) --
 
-    def _count_tiers(self) -> dict[str, int]:
+    @property
+    def relationship_count(self) -> int:
+        """Number of relationships in the graph."""
+        return len(self._relationships)
+
+    @property
+    def state_count(self) -> int:
+        """Number of states in the graph."""
+        return len(self._states)
+
+    def count_tiers(self) -> dict[str, int]:
+        """Count nodes per temporal tier."""
         counts: dict[str, int] = {
             "current": 0, "developing": 0, "proven": 0, "foundation": 0
         }
@@ -955,6 +982,11 @@ class Memory:
             if node_id in self._nodes:  # only count existing nodes
                 counts[meta.tier] = counts.get(meta.tier, 0) + 1
         return counts
+
+    # -- Internal helpers --
+
+    # Keep private alias for backward compat with __repr__ and tests
+    _count_tiers = count_tiers
 
     def _get_query_engine(self) -> QueryEngine:
         """Get query engine, rebuilding if dirty."""
@@ -976,6 +1008,225 @@ class Memory:
         self._states = [s for s in self._states if s.node_id != node_id]
         self._dirty = True
         return True
+
+    def update_node(
+        self,
+        node_id: str,
+        new_content: str,
+        *,
+        reason: str = "",
+    ) -> "UpdateResult":
+        """Update a node's content while preserving relationships, states, and temporal data.
+
+        The node's ID is a content hash, so changing content changes the ID.
+        All relationships, states, and temporal metadata are re-pointed to the new ID.
+        An audit trail entry is written with old/new content and the reason.
+
+        Args:
+            node_id: ID of the existing node to update.
+            new_content: The new content for the node.
+            reason: Why this update happened (for audit trail).
+
+        Returns:
+            UpdateResult with ref (NodeRef), old_id (str), and merged (bool).
+            Use result.ref for the updated node. Check result.merged to detect
+            content-hash collision merges (important for sidecar coordination).
+
+        Raises:
+            KeyError: If node_id doesn't exist.
+
+        Note:
+            Node ``children`` and ``alias_of`` fields may contain node IDs
+            that are NOT re-pointed by this method. These fields are only
+            populated by parsed FlowScript IR (block/group nodes), not by
+            programmatic Memory API usage. The consolidation engine operates
+            on programmatic graphs, so this is safe for its use case.
+        """
+        old_node = self._nodes.get(node_id)
+        if old_node is None:
+            raise KeyError(f"Node {node_id!r} does not exist")
+
+        # Generate new ID from new content
+        new_id = _hash_content(new_content, old_node.type.value)
+
+        # If content hash is unchanged, just return existing ref
+        if new_id == node_id:
+            return UpdateResult(ref=NodeRef(self, old_node), old_id=node_id, merged=False)
+
+        # If new ID already exists (content-hash collision with another node),
+        # merge into the existing node instead of creating a duplicate
+        if new_id in self._nodes:
+            existing_target = self._nodes[new_id]
+            # Write audit trail BEFORE mutation (crash-safe)
+            self._write_audit("update_node_merge", {
+                "old_id": node_id,
+                "merged_into": new_id,
+                "old_content": old_node.content,
+                "target_content": existing_target.content,
+                "node_type": old_node.type.value,
+                "reason": reason,
+            })
+            # Re-point old relationships to the existing target
+            self._repoint_references(node_id, new_id)
+            # Merge temporal metadata — preserve the richer history
+            self._merge_temporal(node_id, new_id)
+            # Remove the old node (relationships already re-pointed)
+            del self._nodes[node_id]
+            self._temporal_map.pop(node_id, None)
+            self._dirty = True
+            return UpdateResult(ref=NodeRef(self, existing_target), old_id=node_id, merged=True)
+
+        # Write audit trail BEFORE mutation (crash-safe — matches merge path)
+        self._write_audit("update_node", {
+            "old_id": node_id,
+            "new_id": new_id,
+            "old_content": old_node.content,
+            "new_content": new_content,
+            "node_type": old_node.type.value,
+            "reason": reason,
+        })
+
+        # Create new node preserving type, provenance, children, etc.
+        new_node = Node(
+            id=new_id,
+            type=old_node.type,
+            content=new_content,
+            provenance=old_node.provenance,
+            children=old_node.children,
+            source_span=old_node.source_span,
+            alias_of=old_node.alias_of,
+            modifiers=old_node.modifiers,
+            ext=old_node.ext,
+        )
+
+        # Add new node, remove old
+        self._nodes[new_id] = new_node
+        del self._nodes[node_id]
+
+        # Re-point all relationships and states
+        self._repoint_references(node_id, new_id)
+
+        # Transfer temporal metadata — preserve created_at, update last_touched
+        old_temporal = self._temporal_map.pop(node_id, None)
+        if old_temporal:
+            self._temporal_map[new_id] = TemporalMeta(
+                created_at=old_temporal.created_at,
+                last_touched=_now_iso(),
+                frequency=old_temporal.frequency,
+                tier=old_temporal.tier,
+            )
+        else:
+            self._temporal_map[new_id] = TemporalMeta(
+                created_at=_now_iso(),
+                last_touched=_now_iso(),
+                frequency=1,
+                tier="current",
+            )
+
+        self._dirty = True
+        return UpdateResult(ref=NodeRef(self, new_node), old_id=node_id, merged=False)
+
+    def _repoint_references(self, old_id: str, new_id: str) -> None:
+        """Re-point all relationships and states from old_id to new_id."""
+        # Re-point relationships — need to rebuild since Relationship is a Pydantic model
+        updated_rels = []
+        for rel in self._relationships:
+            source = new_id if rel.source == old_id else rel.source
+            target = new_id if rel.target == old_id else rel.target
+            if source != rel.source or target != rel.target:
+                # Re-hash the relationship ID with new node IDs
+                raw = f"{rel.type.value}:{source}:{target}"
+                if rel.axis_label:
+                    raw += f":{rel.axis_label}"
+                new_rel_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                updated_rels.append(Relationship(
+                    id=new_rel_id,
+                    type=rel.type,
+                    source=source,
+                    target=target,
+                    axis_label=rel.axis_label,
+                    provenance=rel.provenance,
+                    feedback=rel.feedback,
+                ))
+            else:
+                updated_rels.append(rel)
+        # Filter self-referential relationships (can arise when A→B and A merges into B)
+        updated_rels = [r for r in updated_rels if r.source != r.target]
+        # Deduplicate by relationship ID — merging nodes can create duplicate rels
+        # (e.g., both old and target node had causes→C, re-pointing creates two causes→C)
+        seen_ids: set[str] = set()
+        deduped_rels = []
+        for rel in updated_rels:
+            if rel.id not in seen_ids:
+                seen_ids.add(rel.id)
+                deduped_rels.append(rel)
+        self._relationships = deduped_rels
+
+        # Re-point states
+        updated_states = []
+        for state in self._states:
+            if state.node_id == old_id:
+                # Re-hash state ID with new node ID
+                raw = f"{state.type.value}:{new_id}"
+                new_state_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                updated_states.append(State(
+                    id=new_state_id,
+                    type=state.type,
+                    node_id=new_id,
+                    fields=state.fields,
+                    provenance=state.provenance,
+                ))
+            else:
+                updated_states.append(state)
+        # Deduplicate states by (type, node_id) — merging nodes with same state type
+        # would create duplicates. Keep the first occurrence (typically the target's).
+        seen_state_keys: set[tuple[str, str]] = set()
+        deduped_states = []
+        for state in updated_states:
+            key = (state.type.value, state.node_id)
+            if key not in seen_state_keys:
+                seen_state_keys.add(key)
+                deduped_states.append(state)
+        self._states = deduped_states
+
+    def _write_audit(self, event: str, data: dict[str, Any]) -> None:
+        """Write an audit trail entry if audit_path is configured."""
+        if not self.audit_path:
+            return
+        entry = {"timestamp": _now_iso(), "event": event, **data}
+        audit_path = Path(self.audit_path)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def _merge_temporal(self, old_id: str, target_id: str) -> None:
+        """Merge temporal metadata from old node into target — preserve the richer history.
+
+        Design decisions:
+        - created_at: min(old, target) — knowledge existed since the earliest
+        - frequency: old + target — total engagement count across both
+        - tier: highest of old/target — don't demote established knowledge
+        - last_touched: now — the merge itself is an engagement event
+        """
+        old_temporal = self._temporal_map.get(old_id)
+        target_temporal = self._temporal_map.get(target_id)
+        if not old_temporal or not target_temporal:
+            # If either is missing, just touch the target
+            self._touch_node(target_id)
+            return
+
+        tier_order = {"current": 0, "developing": 1, "proven": 2, "foundation": 3}
+        best_tier = (
+            old_temporal.tier
+            if tier_order.get(old_temporal.tier, 0) > tier_order.get(target_temporal.tier, 0)
+            else target_temporal.tier
+        )
+        self._temporal_map[target_id] = TemporalMeta(
+            created_at=min(old_temporal.created_at, target_temporal.created_at),
+            last_touched=_now_iso(),
+            frequency=old_temporal.frequency + target_temporal.frequency,
+            tier=best_tier,
+        )
 
     def _resolve_ref(self, ref: NodeRef | str) -> NodeRef:
         """Resolve a NodeRef or content string to a NodeRef."""

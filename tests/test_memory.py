@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from flowscript_agents import Memory, NodeRef
-from flowscript_agents.types import IR, Node, NodeType, Provenance
+from flowscript_agents.memory import UpdateResult
+from flowscript_agents.types import IR, Node, NodeType, Provenance, RelationType
 
 
 class TestNodeCreation:
@@ -373,3 +374,298 @@ class TestIntegration:
             # Queries work after reload
             tensions2 = mem2.query.tensions()
             assert tensions2.metadata["total_tensions"] >= 1
+
+
+class TestUpdateNode:
+    """Tests for Memory.update_node() — content modification with reference preservation."""
+
+    def test_basic_update(self):
+        """Update content, verify new content and node count unchanged."""
+        mem = Memory()
+        t = mem.thought("initial content")
+        old_id = t.id
+        result = mem.update_node(old_id, "updated content")
+        assert isinstance(result, UpdateResult)
+        assert result.ref.content == "updated content"
+        assert result.ref.id != old_id  # content hash changed
+        assert result.old_id == old_id
+        assert result.merged is False
+        assert mem.size == 1  # node count unchanged
+
+    def test_update_preserves_type(self):
+        """Updated node keeps its original type."""
+        mem = Memory()
+        s = mem.statement("a fact")
+        result = mem.update_node(s.id, "a better fact")
+        assert result.ref.type == NodeType.STATEMENT
+
+    def test_update_preserves_relationships(self):
+        """Relationships are re-pointed to the new node ID."""
+        mem = Memory()
+        a = mem.thought("cause")
+        b = mem.thought("effect")
+        mem.relate(a, b, RelationType.CAUSES)
+
+        old_b_id = b.id
+        updated_b = mem.update_node(old_b_id, "updated effect").ref
+
+        # Relationship should now point to the updated node
+        rels = [r for r in mem._relationships if r.target == updated_b.id]
+        assert len(rels) == 1
+        assert rels[0].source == a.id
+        assert rels[0].type.value == "causes"
+
+        # No relationships should reference the old ID
+        old_refs = [r for r in mem._relationships if r.source == old_b_id or r.target == old_b_id]
+        assert len(old_refs) == 0
+
+    def test_update_preserves_states(self):
+        """States are re-pointed to the new node ID."""
+        mem = Memory()
+        t = mem.thought("blocked thing")
+        t.block("waiting on approval")
+        old_id = t.id
+
+        updated = mem.update_node(old_id, "updated blocked thing").ref
+
+        # State should be on the new node
+        states = [s for s in mem._states if s.node_id == updated.id]
+        assert len(states) == 1
+        assert states[0].type.value == "blocked"
+
+        # No states on old ID
+        old_states = [s for s in mem._states if s.node_id == old_id]
+        assert len(old_states) == 0
+
+    def test_update_preserves_temporal_created_at(self):
+        """Temporal metadata preserves created_at, updates last_touched."""
+        mem = Memory()
+        mem.session_start()
+        t = mem.thought("original")
+        old_temporal = mem.get_temporal(t.id)
+        old_created = old_temporal.created_at
+
+        updated = mem.update_node(t.id, "modified").ref
+        new_temporal = mem.get_temporal(updated.id)
+
+        assert new_temporal.created_at == old_created  # preserved
+        assert new_temporal.frequency == old_temporal.frequency  # preserved
+
+    def test_update_same_content_noop(self):
+        """Updating with identical content returns same node (no-op)."""
+        mem = Memory()
+        t = mem.thought("same content")
+        old_id = t.id
+        result = mem.update_node(old_id, "same content")
+        assert result.ref.id == old_id  # no change
+        assert result.merged is False
+
+    def test_update_nonexistent_raises(self):
+        """Updating a nonexistent node raises KeyError."""
+        mem = Memory()
+        with pytest.raises(KeyError):
+            mem.update_node("nonexistent_id", "new content")
+
+    def test_update_writes_audit_trail(self):
+        """Update writes to audit log with old/new content."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "mem.json")
+            mem = Memory.load_or_create(path)
+            t = mem.thought("before update")
+            mem.update_node(t.id, "after update", reason="consolidation merge")
+
+            audit_path = path.replace(".json", ".audit.jsonl")
+            assert Path(audit_path).exists()
+            entries = [json.loads(line) for line in Path(audit_path).read_text().splitlines()]
+            assert len(entries) == 1
+            assert entries[0]["event"] == "update_node"
+            assert entries[0]["old_content"] == "before update"
+            assert entries[0]["new_content"] == "after update"
+            assert entries[0]["reason"] == "consolidation merge"
+
+    def test_update_with_multiple_relationships(self):
+        """Node with relationships as both source AND target updates correctly."""
+        mem = Memory()
+        a = mem.thought("upstream cause")
+        b = mem.thought("the node to update")
+        c = mem.thought("downstream effect")
+
+        mem.relate(a, b, RelationType.CAUSES)  # b is target
+        mem.relate(b, c, RelationType.CAUSES)  # b is source
+
+        old_b_id = b.id
+        updated = mem.update_node(old_b_id, "updated middle node").ref
+
+        # Both relationships should now reference updated.id
+        incoming = [r for r in mem._relationships if r.target == updated.id]
+        outgoing = [r for r in mem._relationships if r.source == updated.id]
+        assert len(incoming) == 1  # a → updated
+        assert len(outgoing) == 1  # updated → c
+        assert incoming[0].source == a.id
+        assert outgoing[0].target == c.id
+
+    def test_update_tension_preserves_axis(self):
+        """Tension relationships preserve axis_label through update."""
+        mem = Memory()
+        a = mem.thought("microservices")
+        b = mem.thought("monolith")
+        mem.tension(a, b, "architecture_complexity")
+
+        updated_a = mem.update_node(a.id, "microservices with service mesh").ref
+
+        tensions = [r for r in mem._relationships if r.type.value == "tension"]
+        assert len(tensions) == 1
+        assert tensions[0].axis_label == "architecture_complexity"
+        assert tensions[0].source == updated_a.id
+        assert tensions[0].target == b.id
+
+    def test_update_content_hash_collision(self):
+        """If update content matches ANOTHER existing node, merge into it."""
+        mem = Memory()
+        a = mem.thought("node A")
+        b = mem.thought("node B")
+        c = mem.thought("downstream")
+        mem.relate(a, c, RelationType.CAUSES)  # a → c
+
+        # Update a's content to match b's content exactly
+        result = mem.update_node(a.id, "node B")
+        assert result.ref.id == b.id  # merged into b
+        assert result.merged is True
+        assert result.old_id == a.id
+        assert mem.size == 2  # a removed, b and c remain
+
+        # The relationship should now be b → c
+        rels = [r for r in mem._relationships if r.source == b.id]
+        assert len(rels) == 1
+        assert rels[0].target == c.id
+
+    def test_update_collision_writes_audit(self):
+        """Content-hash collision merge writes audit trail entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "mem.json")
+            mem = Memory.load_or_create(path)
+            a = mem.thought("node A content")
+            b = mem.thought("node B content")
+            # Update a to match b's content → triggers merge
+            mem.update_node(a.id, "node B content", reason="merge test")
+
+            audit_path = path.replace(".json", ".audit.jsonl")
+            assert Path(audit_path).exists()
+            entries = [json.loads(line) for line in Path(audit_path).read_text().splitlines()]
+            assert len(entries) == 1
+            assert entries[0]["event"] == "update_node_merge"
+            assert entries[0]["merged_into"] == b.id
+            assert entries[0]["reason"] == "merge test"
+
+    def test_update_collision_deduplicates_relationships(self):
+        """When merging nodes that both relate to the same third node, no duplicate rels."""
+        mem = Memory()
+        a = mem.thought("node A")
+        b = mem.thought("node B")
+        c = mem.thought("shared target")
+
+        mem.relate(a, c, RelationType.CAUSES)  # a → c
+        mem.relate(b, c, RelationType.CAUSES)  # b → c
+
+        assert mem.relationship_count == 2
+
+        # Merge a into b (update a's content to match b)
+        mem.update_node(a.id, "node B")
+
+        # Should have ONE relationship (b → c), not two duplicates
+        rels_to_c = [r for r in mem._relationships if r.target == c.id]
+        assert len(rels_to_c) == 1
+        assert rels_to_c[0].source == b.id
+
+    def test_update_collision_preserves_target_relationships(self):
+        """When merging into existing node, that node's pre-existing relationships survive."""
+        mem = Memory()
+        a = mem.thought("node A")
+        b = mem.thought("node B")
+        c = mem.thought("only related to B")
+
+        mem.relate(b, c, RelationType.CAUSES)  # b → c (pre-existing on target)
+
+        # Merge a into b
+        result = mem.update_node(a.id, "node B")
+        assert result.ref.id == b.id
+
+        # b's relationship to c should survive
+        rels = [r for r in mem._relationships if r.source == b.id]
+        assert len(rels) == 1
+        assert rels[0].target == c.id
+
+    def test_update_collision_deduplicates_states(self):
+        """When merging nodes that both have the same state type, no duplicate states."""
+        mem = Memory()
+        a = mem.thought("node A blocked")
+        b = mem.thought("node B blocked")
+        a_ref = mem.ref(a.id)
+        b_ref = mem.ref(b.id)
+        a_ref.block("reason A")
+        b_ref.block("reason B")
+
+        # Both are blocked — merge a into b
+        mem.update_node(a.id, "node B blocked")
+
+        # Should have exactly ONE blocked state on b, not two
+        blocked_states = [s for s in mem._states if s.type.value == "blocked"]
+        assert len(blocked_states) == 1
+
+    def test_update_collision_merges_temporal(self):
+        """Merge preserves the richer temporal history (min created, max tier, sum freq)."""
+        mem = Memory()
+        mem.session_start()
+        a = mem.thought("old established knowledge")
+        b = mem.thought("new recent knowledge")
+
+        # Artificially make a's temporal data richer
+        mem._temporal_map[a.id] = mem._temporal_map[a.id].__class__(
+            created_at="2026-01-01T00:00:00+00:00",
+            last_touched="2026-03-15T00:00:00+00:00",
+            frequency=15,
+            tier="proven",
+        )
+
+        # Merge a into b — b should get a's richer history
+        mem.update_node(a.id, "new recent knowledge")
+        merged_temporal = mem.get_temporal(b.id)
+
+        assert merged_temporal.created_at == "2026-01-01T00:00:00+00:00"  # min
+        assert merged_temporal.frequency == 16  # 15 + 1
+        assert merged_temporal.tier == "proven"  # highest tier preserved
+
+    def test_update_collision_filters_self_referential(self):
+        """Merging A into B removes any A→B relationship (would become B→B)."""
+        mem = Memory()
+        a = mem.thought("node A")
+        b = mem.thought("node B")
+        mem.relate(a, b, RelationType.CAUSES)  # a → b
+
+        # Merge a into b — the a→b relationship would become b→b (self-ref)
+        mem.update_node(a.id, "node B")
+
+        # Self-referential relationship should be filtered out
+        self_refs = [r for r in mem._relationships if r.source == r.target]
+        assert len(self_refs) == 0
+
+    def test_update_round_trip_persistence(self):
+        """Updated nodes survive save/load round-trip."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "mem.json")
+            mem = Memory.load_or_create(path)
+            a = mem.thought("original")
+            b = mem.thought("related")
+            mem.relate(a, b, RelationType.CAUSES)
+            updated = mem.update_node(a.id, "modified").ref
+            mem.save()
+
+            mem2 = Memory.load(path)
+            assert mem2.size == 2
+            node = mem2.get_node(updated.id)
+            assert node is not None
+            assert node.content == "modified"
+
+            # Relationship survived
+            rels = [r for r in mem2._relationships if r.source == updated.id]
+            assert len(rels) == 1
