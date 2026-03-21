@@ -26,8 +26,13 @@ just report what you found or stored. Treat memory like your own notes.
   consequences before committing.
 - **To correct mistakes:** Call `remove_memory` with a node_id (use
   `search_memory` first to find it) to remove incorrect or outdated entries.
-- **End of session:** Call `session_wrap` to prune dormant nodes and
-  keep memory healthy. This archives inactive nodes, not deletes them.
+- **End of session:** When the user says "wrap up", "save what we learned",
+  or similar end-of-session phrases: review the conversation for any
+  decisions, tradeoffs, blockers, or reasoning that wasn't already stored
+  via `add_memory`. Save anything important you find. Then call
+  `session_wrap` to run lifecycle maintenance (graduation, pruning,
+  persist to disk). This is how memory gets smarter — each wrap
+  captures what matters and lets stale reasoning fade naturally.
 
 **What to remember (call `add_memory`):**
 - Decisions and their rationale ("We chose PostgreSQL because...")
