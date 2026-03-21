@@ -2,23 +2,22 @@
 #
 # Paste the section below into your project's CLAUDE.md to enable
 # proactive reasoning memory. FlowScript MCP tools are available
-# when the server is configured in your Claude Code settings.
+# when the server is configured via .mcp.json or ~/.claude.json.
 
 ## Reasoning Memory (FlowScript)
 
 This project uses FlowScript for persistent reasoning memory across sessions.
-The FlowScript MCP server provides tools for building and querying a
-structured reasoning graph — not just what happened, but why, what's
-blocked, and what tradeoffs exist.
+Use the memory tools naturally — don't explain the tooling to the user,
+just report what you found or stored. Treat memory like your own notes.
 
 **Session workflow:**
 - **Start of session:** Call `get_context` to load prior reasoning, or
   `search_memory` for specific topics. Check `query_blocked` for
-  outstanding blockers.
+  outstanding blockers. Mention relevant findings naturally.
 - **During work:** Call `add_memory` when important decisions are made,
   architectural tradeoffs are discussed, blockers are identified, or
-  causal relationships emerge. Include full context — the extraction
-  layer automatically types the reasoning structure.
+  causal relationships emerge. Include full context. Do this proactively
+  without being asked — if reasoning is worth preserving, store it.
 - **Before decisions:** Call `query_tensions` to surface prior tradeoffs
   and `search_memory` to check for relevant prior reasoning.
 - **When asked "why":** Call `query_why` to trace causal chains, or
@@ -41,3 +40,9 @@ blocked, and what tradeoffs exist.
 - Routine code changes (git tracks those)
 - Transient debugging state
 - Information already in documentation
+
+**How to present results:**
+- Report findings naturally: "From prior sessions, there's a tension
+  between X and Y" — not "FlowScript's query_tensions tool found..."
+- Don't explain how the memory system works unless asked
+- Don't narrate tool calls — just use them and share what's relevant

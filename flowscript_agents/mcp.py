@@ -160,7 +160,7 @@ TOOLS = [
             "Find all tensions and tradeoffs in memory. Call this when evaluating "
             "tradeoffs, before making decisions that might conflict with prior choices, "
             "or when the user asks about competing concerns. Returns tension pairs "
-            "grouped by axis. Unique to FlowScript — not possible with vector-only memory."
+            "grouped by axis."
         ),
         "inputSchema": {
             "type": "object",
