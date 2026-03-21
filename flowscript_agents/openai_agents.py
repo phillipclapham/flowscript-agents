@@ -20,10 +20,19 @@ session.memory directly or expose as agent tools.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from .memory import Memory, NodeRef
+_log = logging.getLogger(__name__)
+
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptSession:
@@ -35,9 +44,26 @@ class FlowScriptSession:
     - pop_item() → remove and return last item
     - clear_session() → clear all items
 
+    For vector-powered search, provide an embedder::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        session = FlowScriptSession(
+            "conv_123",
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+        )
+
     Access FlowScript queries via .memory property:
         session.memory.query.tensions()
         session.memory.query.blocked()
+
+    Note: ``llm`` and ``consolidation_provider`` create the underlying
+    UnifiedMemory infrastructure but are NOT invoked by add_items/get_items.
+    This adapter stores conversation items as-is (session protocol).
+    To use auto-extraction and consolidation, call ``session.unified.add()``
+    directly, or use the Pydantic AI adapter whose ``store()`` method
+    routes through the full pipeline.
     """
 
     def __init__(
@@ -45,14 +71,34 @@ class FlowScriptSession:
         session_id: str,
         file_path: str | None = None,
         session_settings: Any = None,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
     ) -> None:
         self.session_id = session_id
         self.session_settings = session_settings
 
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         self._file_path = file_path
 
         # Ordered list of conversation items for this session
@@ -64,6 +110,11 @@ class FlowScriptSession:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, content: str) -> NodeRef | None:
         """Resolve a conversation item to a FlowScript NodeRef by content match.
@@ -122,11 +173,20 @@ class FlowScriptSession:
                     "oai_order": base_order + i,
                     "oai_item": item,
                 })
+                # Index for vector search if available
+                if self._unified and self._unified.vector_index:
+                    try:
+                        self._unified.vector_index.index_node(ref.id)
+                    except Exception as exc:
+                        _log.warning("Failed to index node %s: %s", ref.id[:12], exc)
 
             self._items.append(item)
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
 
     async def pop_item(self) -> dict[str, Any] | None:
         """Remove and return the most recent item."""
@@ -134,18 +194,23 @@ class FlowScriptSession:
             return None
         item = self._items.pop()
 
-        # Remove the corresponding FlowScript node
+        # Remove the corresponding FlowScript node + its vector
         content = _extract_item_content(item)
         if content:
             node_content = f"[{self.session_id}] {content}"
             matches = self._memory.find_nodes(node_content)
             for ref in matches:
                 if ref.content == node_content:
+                    if self._unified and self._unified.vector_index:
+                        self._unified.vector_index.remove_node(ref.id)
                     self._memory.remove_node(ref.id)
                     break
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
         return item
 
     async def clear_session(self) -> None:
@@ -158,17 +223,27 @@ class FlowScriptSession:
             if ext.get("oai_session_id") == self.session_id:
                 to_remove.append(ref.id)
         for node_id in to_remove:
+            if self._unified and self._unified.vector_index:
+                self._unified.vector_index.remove_node(node_id)
             self._memory.remove_node(node_id)
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
 
     def save(self) -> None:
-        """Persist to disk."""
-        self._memory.save()
+        """Persist to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 

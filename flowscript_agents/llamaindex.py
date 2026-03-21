@@ -24,13 +24,19 @@ Note: Requires llama-index-core: pip install flowscript-agents[llamaindex]
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
 
 from pydantic import ConfigDict, PrivateAttr
 
 from llama_index.core.memory import BaseMemoryBlock
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
@@ -42,6 +48,16 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
     The block participates in LlamaIndex's flush pipeline:
     - Short-term messages overflow → _aput() stores them as FlowScript nodes
     - Agent needs context → _aget() returns semantic memory summary
+
+    For auto-extraction and vector search::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        block = FlowScriptMemoryBlock(
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+            llm=my_llm_fn,
+        )
 
     Access FlowScript queries via .memory property::
 
@@ -59,6 +75,7 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
 
     # Private attributes (not Pydantic fields — internal state)
     _memory: Memory = PrivateAttr()
+    _unified: Any = PrivateAttr(default=None)
     _file_path: Optional[str] = PrivateAttr(default=None)
     _max_tokens: int = PrivateAttr(default=4000)
     _include_queries: bool = PrivateAttr(default=True)
@@ -70,6 +87,10 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
         name: str = "flowscript_reasoning",
         max_tokens: int = 4000,
         include_queries: bool = True,
+        embedder: Any = None,
+        llm: Any = None,
+        consolidation_provider: Any = None,
+        options: Any = None,
         **kwargs: Any,
     ) -> None:
         """Initialize FlowScript memory block.
@@ -80,7 +101,20 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
             max_tokens: Token budget for context returned by _aget().
             include_queries: Whether to append semantic query results
                 (tensions, blocked) to the context output.
+            embedder: Embedding provider for vector search.
+            llm: LLM function for auto-extraction.
+            consolidation_provider: Tool-calling LLM for consolidation.
+            options: MemoryOptions for the underlying Memory.
         """
+        # Filter out unified kwargs that shouldn't go to BaseMemoryBlock
+        block_kwargs = {k: v for k, v in kwargs.items()
+                       if k not in ("dedup_threshold", "candidate_threshold",
+                                     "vector_weight", "keyword_weight",
+                                     "temporal_weight", "auto_save")}
+        unified_kwargs = {k: v for k, v in kwargs.items()
+                         if k in ("dedup_threshold", "candidate_threshold",
+                                   "vector_weight", "keyword_weight",
+                                   "temporal_weight", "auto_save")}
         super().__init__(
             name=name,
             description=(
@@ -89,22 +123,41 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
             ),
             priority=1,
             accept_short_term_memory=True,
-            **kwargs,
+            **block_kwargs,
         )
         self._max_tokens = max_tokens
         self._include_queries = include_queries
         self._file_path = file_path
+        self._unified = None
 
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
         """Access the underlying FlowScript Memory for semantic queries."""
         return self._memory
+
+    @property
+    def unified(self) -> Any:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, content: str) -> NodeRef | None:
         """Resolve stored content to a FlowScript NodeRef for semantic operations.
@@ -138,6 +191,10 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
         """
         if self._memory.size == 0:
             return ""
+
+        # Use unified context when available (better ranking)
+        if self._unified:
+            return self._unified.get_context(max_tokens=self._max_tokens)
 
         # Build context with tier info, respecting token budget
         lines: list[str] = []
@@ -194,35 +251,60 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
     async def _aput(self, messages: List[Any]) -> None:
         """Store flushed messages as FlowScript nodes.
 
-        Called by LlamaIndex's Memory when short-term messages overflow.
-        Each message becomes a FlowScript node with metadata about role
-        and position. Handles both ChatMessage objects and plain dicts.
+        When UnifiedMemory is configured with an LLM, uses auto-extraction
+        to create typed reasoning nodes. Otherwise stores raw messages.
 
         Args:
             messages: List of ChatMessage objects (or dicts for testing).
         """
-        prev_ref = None
-        for msg in messages:
-            content = _extract_message_content(msg)
-            if not content:
-                continue
+        llamaindex_meta = {"llamaindex_source": "flush"}
 
-            role = _extract_role(msg)
-            ref = self._memory.thought(content)
-            node = ref.node
-            node.ext = node.ext or {}
-            node.ext.update({
-                "llamaindex_role": role,
-                "llamaindex_source": "flush",
-            })
+        # Use auto-extraction when available
+        if self._unified and self._unified.extractor:
+            texts = []
+            for msg in messages:
+                content = _extract_message_content(msg)
+                if content:
+                    role = _extract_role(msg)
+                    texts.append(f"[{role}] {content}")
+            if texts:
+                combined = "\n".join(texts)
+                result = self._unified.add(combined, metadata=llamaindex_meta)
+                # Tag extracted nodes
+                for node_id in result.node_ids:
+                    node = self._memory.get_node(node_id)
+                    if node:
+                        node.ext = node.ext or {}
+                        node.ext.update(llamaindex_meta)
+        else:
+            prev_ref = None
+            for msg in messages:
+                content = _extract_message_content(msg)
+                if not content:
+                    continue
 
-            # Chain sequential messages
-            if prev_ref:
-                prev_ref.then(ref)
-            prev_ref = ref
+                role = _extract_role(msg)
+                ref = self._memory.thought(content)
+                node = ref.node
+                node.ext = node.ext or {}
+                node.ext.update({
+                    "llamaindex_role": role,
+                    **llamaindex_meta,
+                })
+
+                # Index for vector search if available
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.index_node(ref.id)
+
+                if prev_ref:
+                    prev_ref.then(ref)
+                prev_ref = ref
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
 
     async def atruncate(self, content: str, tokens_to_truncate: int) -> str | None:
         """Intelligently truncate memory context when token-constrained.
@@ -262,7 +344,29 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
         return ref
 
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Search memory for relevant content using word-level matching."""
+        """Search memory for relevant content.
+
+        Uses unified search (vector + keyword + temporal) when available.
+        """
+        if self._unified:
+            unified_results = self._unified.search(query, top_k=limit)
+            if unified_results:
+                self._memory.touch_nodes_session_scoped(
+                    [r.node_id for r in unified_results]
+                )
+            results = []
+            for r in unified_results:
+                meta = self._memory.temporal_map.get(r.node_id)
+                results.append({
+                    "content": r.content,
+                    "id": r.node_id,
+                    "tier": meta.tier if meta else "current",
+                    "frequency": meta.frequency if meta else 1,
+                    "score": r.combined_score,
+                })
+            return results
+
+        # Fallback: word-level matching
         query_words = [w.lower() for w in query.split() if len(w) > 2]
         scored: list[tuple[NodeRef, float]] = []
         if query_words:
@@ -289,11 +393,16 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
         return results
 
     def save(self) -> None:
-        """Persist memory to disk."""
-        self._memory.save()
+        """Persist memory to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 

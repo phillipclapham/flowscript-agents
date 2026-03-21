@@ -27,11 +27,17 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 from haystack.dataclasses import ChatMessage as HaystackChatMessage
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptMemoryStore:
@@ -39,6 +45,16 @@ class FlowScriptMemoryStore:
 
     Implements the MemoryStore protocol (duck-typed). Each memory maps
     to a FlowScript node with temporal intelligence.
+
+    For auto-extraction and vector search::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        store = FlowScriptMemoryStore(
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+            llm=my_llm_fn,
+        )
 
     Access FlowScript queries via .memory property::
 
@@ -52,11 +68,34 @@ class FlowScriptMemoryStore:
             ref.decide(rationale="Based on load testing results")
     """
 
-    def __init__(self, file_path: str | None = None) -> None:
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+    def __init__(
+        self,
+        file_path: str | None = None,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
+    ) -> None:
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         self._file_path = file_path
         # Index: memory_id → node_id
         self._id_map: dict[str, str] = {}
@@ -66,6 +105,11 @@ class FlowScriptMemoryStore:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, memory_id: str) -> NodeRef | None:
         """Resolve a memory ID to a FlowScript NodeRef for semantic operations.
@@ -105,43 +149,77 @@ class FlowScriptMemoryStore:
     ) -> None:
         """Extract and store memories from chat messages.
 
-        Each message becomes a FlowScript node. Messages are chained
-        sequentially for causal tracking.
+        When UnifiedMemory is configured with an LLM, uses auto-extraction
+        to create typed reasoning nodes. Otherwise, stores each message
+        as a thought node.
 
         Args:
             messages: List of ChatMessage objects or dicts.
             user_id: Optional user identifier for scoping.
             **kwargs: Additional args (agent_id, run_id, etc.)
         """
-        prev_ref = None
-        for msg in messages:
-            content = _extract_content(msg)
-            if not content:
-                continue
+        haystack_meta = {"haystack_user_id": user_id}
+        for k, v in kwargs.items():
+            haystack_meta[f"haystack_{k}"] = v
 
-            memory_id = str(uuid.uuid4())
-            role = _extract_role(msg)
+        # Use auto-extraction when available
+        if self._unified and self._unified.extractor:
+            texts = []
+            roles = []
+            for msg in messages:
+                content = _extract_content(msg)
+                if content:
+                    role = _extract_role(msg)
+                    texts.append(f"[{role}] {content}")
+                    roles.append(role)
+            if texts:
+                combined = "\n".join(texts)
+                result = self._unified.add(combined, metadata=haystack_meta)
+                # Tag extracted nodes and build id_map
+                unique_roles = list(set(roles))
+                for node_id in result.node_ids:
+                    memory_id = str(uuid.uuid4())
+                    node = self._memory.get_node(node_id)
+                    if node:
+                        node.ext = node.ext or {}
+                        node.ext["haystack_memory_id"] = memory_id
+                        node.ext["haystack_roles"] = unique_roles
+                        node.ext.update(haystack_meta)
+                    self._id_map[memory_id] = node_id
+        else:
+            prev_ref = None
+            for msg in messages:
+                content = _extract_content(msg)
+                if not content:
+                    continue
 
-            ref = self._memory.thought(content)
-            node = ref.node
-            node.ext = node.ext or {}
-            node.ext.update({
-                "haystack_memory_id": memory_id,
-                "haystack_role": role,
-                "haystack_user_id": user_id,
-            })
-            # Store any extra kwargs
-            for k, v in kwargs.items():
-                node.ext[f"haystack_{k}"] = v
+                memory_id = str(uuid.uuid4())
+                role = _extract_role(msg)
 
-            self._id_map[memory_id] = ref.id
+                ref = self._memory.thought(content)
+                node = ref.node
+                node.ext = node.ext or {}
+                node.ext.update({
+                    "haystack_memory_id": memory_id,
+                    "haystack_role": role,
+                })
+                node.ext.update(haystack_meta)
 
-            if prev_ref:
-                prev_ref.then(ref)
-            prev_ref = ref
+                self._id_map[memory_id] = ref.id
+
+                # Index for vector search if available
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.index_node(ref.id)
+
+                if prev_ref:
+                    prev_ref.then(ref)
+                prev_ref = ref
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
 
     def search_memories(
         self,
@@ -167,17 +245,27 @@ class FlowScriptMemoryStore:
         Returns:
             List of ChatMessage-compatible dicts with memory content.
         """
-        # Word-level search
+        # Use unified search when available (vector + keyword + temporal)
         scored: list[tuple[NodeRef, float]] = []
-        if query:
+        if query and self._unified:
+            unified_results = self._unified.search(query, top_k=top_k * 2)
+            for r in unified_results:
+                try:
+                    ref = self._memory.ref(r.node_id)
+                    ext = ref.node.ext or {}
+                    if user_id and ext.get("haystack_user_id") != user_id:
+                        continue
+                    scored.append((ref, r.combined_score))
+                except KeyError:
+                    continue
+        elif query:
+            # Fallback: word-level search
             query_words = [w.lower() for w in query.split() if len(w) > 2]
             if query_words:
                 for node in self._memory._nodes.values():
-                    # User filter
                     ext = node.ext or {}
                     if user_id and ext.get("haystack_user_id") != user_id:
                         continue
-
                     content_lower = node.content.lower()
                     hits = sum(1 for w in query_words if w in content_lower)
                     if hits > 0:
@@ -296,11 +384,16 @@ class FlowScriptMemoryStore:
     # -- Additional convenience methods --
 
     def save(self) -> None:
-        """Persist to disk."""
-        self._memory.save()
+        """Persist to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 

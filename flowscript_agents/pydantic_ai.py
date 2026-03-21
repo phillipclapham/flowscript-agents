@@ -23,11 +23,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic_ai import RunContext
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 @dataclass
@@ -43,6 +49,18 @@ class FlowScriptDeps:
         deps = FlowScriptDeps(file_path="./agent-memory.json")
         result = await agent.run("What should we use for caching?", deps=deps)
 
+    For vector-powered search and auto-extraction::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        deps = FlowScriptDeps(
+            file_path="./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+            llm=my_llm_fn,
+        )
+        # store() now auto-extracts typed reasoning
+        # recall() now uses vector + keyword + temporal ranking
+
     For semantic queries, use resolve() to build relationships::
 
         ref = deps.resolve("chose Redis")
@@ -53,19 +71,43 @@ class FlowScriptDeps:
     """
 
     file_path: str | None = None
+    embedder: Any = field(default=None, repr=False)
+    llm: Any = field(default=None, repr=False)
+    consolidation_provider: Any = field(default=None, repr=False)
+    options: Any = field(default=None, repr=False)
+    unified_kwargs: dict = field(default_factory=dict, repr=False)
     _memory: Memory = field(init=False, repr=False)
+    _unified: Any = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
-        if self.file_path:
-            self._memory = Memory.load_or_create(self.file_path)
+        if self.embedder or self.llm or self.consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=self.file_path,
+                embedder=self.embedder,
+                llm=self.llm,
+                consolidation_provider=self.consolidation_provider,
+                options=self.options,
+                **self.unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if self.file_path:
+                self._memory = Memory.load_or_create(self.file_path, options=self.options)
+            else:
+                self._memory = Memory(options=self.options)
         self._memory.session_start()
 
     @property
     def memory(self) -> Memory:
         """Access the underlying FlowScript Memory for semantic queries."""
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, content: str) -> NodeRef | None:
         """Resolve stored content to a FlowScript NodeRef for semantic operations.
@@ -87,6 +129,11 @@ class FlowScriptDeps:
     def store(self, content: str, **metadata: Any) -> NodeRef:
         """Store a thought in memory. Returns NodeRef for chaining.
 
+        When UnifiedMemory is configured with an LLM, uses auto-extraction
+        to create typed reasoning nodes (decisions, tensions, etc.) instead
+        of a single thought node. Returns a NodeRef to the first extracted
+        node for method chaining (.decide(), .block(), .tension_with(), etc.).
+
         Args:
             content: The content to remember.
             **metadata: Optional metadata stored in node.ext.
@@ -94,19 +141,32 @@ class FlowScriptDeps:
         Returns:
             NodeRef for building relationships (causes, tension_with, etc.)
         """
+        if self._unified and self._unified.extractor:
+            result = self._unified.add(content, metadata=metadata if metadata else None)
+            # Return first extracted node for chaining
+            if result.node_ids:
+                try:
+                    return self._memory.ref(result.node_ids[0])
+                except KeyError:
+                    pass
+            # Fallback: create simple thought if extraction produced nothing
+            return self._memory.thought(content)
+
         ref = self._memory.thought(content)
         if metadata:
             ref.node.ext = ref.node.ext or {}
             ref.node.ext["pydantic_ai_meta"] = metadata
+        # Index for vector search if available
+        if self._unified and self._unified.vector_index:
+            self._unified.vector_index.index_node(ref.id)
         return ref
 
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Search memory for relevant content.
 
-        Uses word-level matching: splits query into words, matches nodes
-        containing any query word, scores by proportion of words matched.
-        This handles natural language queries that won't match as exact
-        substrings in longer content.
+        When UnifiedMemory is configured, uses vector + keyword + temporal
+        ranking for much better search quality. Falls back to word-level
+        matching without embedder.
 
         Args:
             query: Text to search for.
@@ -115,6 +175,26 @@ class FlowScriptDeps:
         Returns:
             List of dicts with 'content', 'id', 'tier', 'frequency' keys.
         """
+        # Use unified search when available (vector + keyword + temporal)
+        if self._unified:
+            unified_results = self._unified.search(query, top_k=limit)
+            if unified_results:
+                self._memory.touch_nodes_session_scoped(
+                    [r.node_id for r in unified_results]
+                )
+            results = []
+            for r in unified_results:
+                meta = self._memory.temporal_map.get(r.node_id)
+                results.append({
+                    "content": r.content,
+                    "id": r.node_id,
+                    "tier": meta.tier if meta else "current",
+                    "frequency": meta.frequency if meta else 1,
+                    "score": r.combined_score,
+                })
+            return results
+
+        # Fallback: word-level matching
         query_words = [w.lower() for w in query.split() if len(w) > 2]
         scored: list[tuple[NodeRef, float]] = []
         if query_words:
@@ -145,7 +225,11 @@ class FlowScriptDeps:
 
         Returns a structured summary of memory nodes with tier info.
         Use in @agent.instructions for automatic context injection.
+        When UnifiedMemory is configured, uses its get_context method.
         """
+        if self._unified:
+            return self._unified.get_context(max_tokens=max_tokens)
+
         if self._memory.size == 0:
             return ""
 
@@ -164,11 +248,16 @@ class FlowScriptDeps:
         return "\n".join(lines)
 
     def save(self) -> None:
-        """Persist memory to disk."""
-        self._memory.save()
+        """Persist memory to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 
@@ -192,6 +281,9 @@ def create_memory_tools() -> list:
         - recall_memory: Search for relevant past context
         - query_tensions: Find active tradeoffs and tensions
         - query_blocked: Find blockers and their downstream impact
+        - query_why: Trace causal chains backward (why did this happen?)
+        - query_what_if: Explore downstream impact (what would change?)
+        - query_alternatives: Find alternatives for decision points
     """
 
     async def store_memory(ctx: RunContext[FlowScriptDeps], content: str, category: str = "observation") -> str:
@@ -249,4 +341,52 @@ def create_memory_tools() -> list:
             return "Nothing blocked. Use store.resolve() to mark items as blocked."
         return str(blocked)
 
-    return [store_memory, recall_memory, query_tensions, query_blocked]
+    async def query_why(ctx: RunContext[FlowScriptDeps], node_content: str) -> str:
+        """Trace why something happened — follow causal chains backward.
+
+        Args:
+            ctx: RunContext with FlowScriptDeps.
+            node_content: Content of the node to trace causes for.
+
+        Returns:
+            Causal chain from the node back to its root cause.
+        """
+        ref = ctx.deps.resolve(node_content)
+        if not ref:
+            return f"No memory found matching '{node_content}'. Store it first, then build causal relationships with resolve()."
+        result = ctx.deps.memory.query.why(ref.id)
+        return str(result)
+
+    async def query_what_if(ctx: RunContext[FlowScriptDeps], node_content: str) -> str:
+        """Explore downstream impact — what would be affected if this changed?
+
+        Args:
+            ctx: RunContext with FlowScriptDeps.
+            node_content: Content of the node to trace effects from.
+
+        Returns:
+            Impact tree showing downstream consequences.
+        """
+        ref = ctx.deps.resolve(node_content)
+        if not ref:
+            return f"No memory found matching '{node_content}'. Store it first, then build causal relationships with resolve()."
+        result = ctx.deps.memory.query.what_if(ref.id)
+        return str(result)
+
+    async def query_alternatives(ctx: RunContext[FlowScriptDeps], question_content: str) -> str:
+        """Find alternatives for a question or decision point.
+
+        Args:
+            ctx: RunContext with FlowScriptDeps.
+            question_content: Content of the question node to find alternatives for.
+
+        Returns:
+            List of alternatives with their states (decided, blocked, exploring, etc.)
+        """
+        ref = ctx.deps.resolve(question_content)
+        if not ref:
+            return f"No memory found matching '{question_content}'. Store a question first, then add alternatives with resolve()."
+        result = ctx.deps.memory.query.alternatives(ref.id)
+        return str(result)
+
+    return [store_memory, recall_memory, query_tensions, query_blocked, query_why, query_what_if, query_alternatives]

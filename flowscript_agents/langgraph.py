@@ -14,9 +14,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
+
+_log = logging.getLogger(__name__)
 
 from langgraph.store.base import (
     BaseStore,
@@ -31,7 +34,16 @@ from langgraph.store.base import (
     SearchOp,
 )
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+# Lazy imports — avoid loading embeddings package for users who don't need it
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptStore(BaseStore):
@@ -58,14 +70,54 @@ class FlowScriptStore(BaseStore):
 
         # Now semantic queries find these relationships
         tensions = store.memory.query.tensions()
+
+    For vector-powered search, provide an embedder::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        store = FlowScriptStore(
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+        )
+        # search() now uses vector similarity + keyword + temporal ranking
+
+    Note: ``llm`` and ``consolidation_provider`` create the underlying
+    UnifiedMemory infrastructure but are NOT invoked by put/get/search.
+    This adapter stores items as-is (the framework controls what goes in).
+    To use auto-extraction and consolidation, call ``store.unified.add()``
+    directly, or use the Pydantic AI adapter whose ``store()`` method
+    routes through the full pipeline.
     """
 
-    def __init__(self, file_path: str | None = None) -> None:
+    def __init__(
+        self,
+        file_path: str | None = None,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
+    ) -> None:
         super().__init__()
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         # In-memory index: namespace+key → node_id + value
         self._items: dict[tuple[tuple[str, ...], str], _StoredItem] = {}
         # Rebuild index from loaded memory
@@ -82,6 +134,11 @@ class FlowScriptStore(BaseStore):
             blocked = store.memory.query.blocked()
         """
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, namespace: tuple[str, ...], key: str) -> NodeRef | None:
         """Resolve a stored item to a FlowScript NodeRef for semantic operations.
@@ -168,6 +225,8 @@ class FlowScriptStore(BaseStore):
             # Delete: remove from index AND from FlowScript graph
             stored = self._items.pop((ns, key), None)
             if stored:
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.remove_node(stored.node_id)
                 self._memory.remove_node(stored.node_id)
             return
 
@@ -179,7 +238,9 @@ class FlowScriptStore(BaseStore):
         content = op.value.get("content") or op.value.get("memory") or json.dumps(op.value)
 
         if existing:
-            # Remove old node, create new one with updated content
+            # Remove old node + its vector, create new one with updated content
+            if self._unified and self._unified.vector_index:
+                self._unified.vector_index.remove_node(existing.node_id)
             self._memory.remove_node(existing.node_id)
             ref = self._memory.thought(content)
             node = ref.node
@@ -190,6 +251,12 @@ class FlowScriptStore(BaseStore):
             existing.node_id = ref.id
             existing.value = op.value
             existing.updated_at = now
+            # Index for vector search if available
+            if self._unified and self._unified.vector_index:
+                try:
+                    self._unified.vector_index.index_node(ref.id)
+                except Exception as exc:
+                    _log.warning("Failed to index node %s: %s", ref.id[:12], exc)
         else:
             # Create new node
             ref = self._memory.thought(content)
@@ -207,10 +274,24 @@ class FlowScriptStore(BaseStore):
                 created_at=now,
                 updated_at=now,
             )
+            # Index for vector search if available
+            if self._unified and self._unified.vector_index:
+                try:
+                    self._unified.vector_index.index_node(ref.id)
+                except Exception as exc:
+                    _log.warning("Failed to index node %s: %s", ref.id[:12], exc)
 
     def _handle_search(self, op: SearchOp) -> list[SearchItem]:
         results: list[SearchItem] = []
         prefix = op.namespace_prefix
+
+        # When unified memory is available and query is provided, use vector search
+        # for scoring instead of substring matching
+        vector_scores: dict[str, float] = {}
+        if op.query and self._unified:
+            unified_results = self._unified.search(op.query, top_k=op.limit * 2)
+            for ur in unified_results:
+                vector_scores[ur.node_id] = ur.combined_score
 
         for (ns, key), stored in self._items.items():
             # Check namespace prefix match
@@ -222,17 +303,20 @@ class FlowScriptStore(BaseStore):
                 if not _matches_filter(stored.value, op.filter):
                     continue
 
-            # Score by query match (simple content matching)
+            # Score: prefer vector similarity when available
             score = 0.0
             if op.query:
-                content_str = json.dumps(stored.value).lower()
-                query_lower = op.query.lower()
-                if query_lower in content_str:
-                    # Simple relevance: ratio of query length to content length
-                    score = len(query_lower) / max(len(content_str), 1)
+                if stored.node_id in vector_scores:
+                    score = vector_scores[stored.node_id]
                 else:
-                    # No match — skip if query was specified
-                    continue
+                    # Fallback to substring matching
+                    content_str = json.dumps(stored.value).lower()
+                    query_lower = op.query.lower()
+                    if query_lower in content_str:
+                        score = len(query_lower) / max(len(content_str), 1)
+                    else:
+                        # No match — skip if query was specified and no vector hit
+                        continue
 
             results.append(
                 SearchItem(
@@ -289,11 +373,16 @@ class FlowScriptStore(BaseStore):
         return sorted_ns[op.offset : op.offset + op.limit]
 
     def save(self) -> None:
-        """Persist the store to disk."""
-        self._memory.save()
+        """Persist the store to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 

@@ -19,11 +19,20 @@ but CrewAI itself won't install.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, TYPE_CHECKING
 
-from .memory import Memory, NodeRef
+_log = logging.getLogger(__name__)
+
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptStorage:
@@ -36,18 +45,57 @@ class FlowScriptStorage:
         storage.memory.query.tensions()
         storage.memory.query.blocked()
 
+    For vector-powered search, provide an embedder::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        storage = FlowScriptStorage(
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+        )
+
     For semantic queries, use resolve() to get a NodeRef::
 
         ref = storage.resolve("record_123")
         ref.block(reason="Waiting on API keys")
         storage.memory.query.blocked()
+
+    Note: ``llm`` and ``consolidation_provider`` create the underlying
+    UnifiedMemory infrastructure but are NOT invoked by save/search.
+    This adapter stores records as-is (the framework controls what goes in).
+    To use auto-extraction and consolidation, call ``storage.unified.add()``
+    directly, or use the Pydantic AI adapter whose ``store()`` method
+    routes through the full pipeline.
     """
 
-    def __init__(self, file_path: str | None = None) -> None:
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+    def __init__(
+        self,
+        file_path: str | None = None,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
+    ) -> None:
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         # Index: record_id → {node_id, record_data}
         self._records: dict[str, _RecordEntry] = {}
         self._rebuild_index()
@@ -57,6 +105,11 @@ class FlowScriptStorage:
     @property
     def memory(self) -> Memory:
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, record_id: str) -> NodeRef | None:
         """Resolve a stored record to a FlowScript NodeRef for semantic operations.
@@ -93,8 +146,8 @@ class FlowScriptStorage:
                     categories=node.ext.get("categories", []),
                     metadata=node.ext.get("metadata", {}),
                     importance=node.ext.get("importance", 0.5),
-                    created_at=node.ext.get("created_at", node.provenance.timestamp),
-                    last_accessed=node.ext.get("last_accessed", node.provenance.timestamp),
+                    created_at=_to_datetime(node.ext.get("created_at", node.provenance.timestamp)),
+                    last_accessed=_to_datetime(node.ext.get("last_accessed", node.provenance.timestamp)),
                     embedding=node.ext.get("embedding"),
                     source=node.ext.get("source"),
                     private=node.ext.get("private", False),
@@ -141,12 +194,18 @@ class FlowScriptStorage:
                 categories=categories,
                 metadata=metadata,
                 importance=importance,
-                created_at=_dt_to_str(created_at),
-                last_accessed=_dt_to_str(last_accessed),
+                created_at=_to_datetime(created_at),
+                last_accessed=_to_datetime(last_accessed),
                 embedding=embedding,
                 source=source,
                 private=private,
             )
+            # Index for vector search if available
+            if self._unified and self._unified.vector_index:
+                try:
+                    self._unified.vector_index.index_node(ref.id)
+                except Exception as exc:
+                    _log.warning("Failed to index node %s: %s", ref.id[:12], exc)
 
     def search(
         self,
@@ -159,10 +218,20 @@ class FlowScriptStorage:
     ) -> list[tuple[Any, float]]:
         """Search for records. Returns (MemoryRecord-like, score) tuples.
 
-        Uses cosine similarity when embeddings are available,
-        falls back to content matching otherwise.
+        When UnifiedMemory is configured with an embedder, uses the VectorIndex
+        for scoring (compares query_embedding against indexed node vectors).
+        Falls back to per-record embeddings or content matching otherwise.
         """
         results: list[tuple[_RecordEntry, float]] = []
+
+        # Build vector scores from VectorIndex when available
+        # This uses FlowScript's indexed vectors (always populated on save)
+        # rather than per-record embeddings (only set by CrewAI's own pipeline)
+        vi_scores: dict[str, float] = {}
+        if query_embedding and self._unified and self._unified.vector_index:
+            vi = self._unified.vector_index
+            for node_id, vec in vi._vectors.items():
+                vi_scores[node_id] = _cosine_similarity(query_embedding, vec)
 
         for entry in self._records.values():
             # Scope filter
@@ -181,9 +250,11 @@ class FlowScriptStorage:
                 ):
                     continue
 
-            # Score: cosine similarity if embeddings exist
-            score = 0.5  # default
-            if query_embedding and entry.embedding:
+            # Score: prefer VectorIndex, then per-record embedding, then default
+            score = 0.0
+            if entry.node_id in vi_scores:
+                score = vi_scores[entry.node_id]
+            elif query_embedding and entry.embedding:
                 score = _cosine_similarity(query_embedding, entry.embedding)
 
             if score >= min_score:
@@ -241,6 +312,8 @@ class FlowScriptStorage:
 
         for rec_id in to_delete:
             entry = self._records.pop(rec_id)
+            if self._unified and self._unified.vector_index:
+                self._unified.vector_index.remove_node(entry.node_id)
             self._memory.remove_node(entry.node_id)
 
         return len(to_delete)
@@ -252,8 +325,10 @@ class FlowScriptStorage:
             entry = self._records[rec_id]
             new_content = getattr(record, "content", entry.content)
 
-            # If content changed, replace the node
+            # If content changed, replace the node + its vector
             if new_content != entry.content:
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.remove_node(entry.node_id)
                 self._memory.remove_node(entry.node_id)
                 ref = self._memory.thought(new_content)
                 node = ref.node
@@ -351,9 +426,11 @@ class FlowScriptStorage:
         )
 
     def reset(self, scope_prefix: str | None = None) -> None:
-        """Delete all records (or scoped subset). Removes nodes from graph."""
+        """Delete all records (or scoped subset). Removes nodes + vectors from graph."""
         if scope_prefix is None:
             for entry in self._records.values():
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.remove_node(entry.node_id)
                 self._memory.remove_node(entry.node_id)
             self._records.clear()
         else:
@@ -363,6 +440,8 @@ class FlowScriptStorage:
             ]
             for k in to_delete:
                 entry = self._records.pop(k)
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.remove_node(entry.node_id)
                 self._memory.remove_node(entry.node_id)
 
     # -- Async variants (delegate to sync) --
@@ -394,11 +473,21 @@ class FlowScriptStorage:
         return self.delete(scope_prefix, categories, record_ids, older_than, metadata_filter)
 
     def save_to_disk(self) -> None:
-        """Persist to disk."""
-        self._memory.save()
+        """Persist FlowScript memory to disk. No-op if no file_path was provided.
+
+        Note: This is separate from save() which is the CrewAI StorageBackend
+        protocol method for saving MemoryRecord objects. Use save_to_disk() to
+        persist the FlowScript reasoning graph itself.
+        """
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 
@@ -415,6 +504,11 @@ class _RecordEntry:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    @property
+    def id(self) -> str:
+        """Alias for record_id — matches MemoryRecord.id."""
+        return self.record_id
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.record_id,
@@ -423,8 +517,8 @@ class _RecordEntry:
             "categories": self.categories,
             "metadata": self.metadata,
             "importance": self.importance,
-            "created_at": self.created_at,
-            "last_accessed": self.last_accessed,
+            "created_at": _dt_to_str(self.created_at),
+            "last_accessed": _dt_to_str(self.last_accessed),
             "embedding": self.embedding,
             "source": self.source,
             "private": self.private,
@@ -435,6 +529,18 @@ def _dt_to_str(dt: Any) -> str:
     if isinstance(dt, datetime):
         return dt.isoformat()
     return str(dt)
+
+
+def _to_datetime(val: Any) -> datetime:
+    """Coerce a value to datetime. Handles datetime, ISO string, or fallback to now."""
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val)
+        except (ValueError, TypeError):
+            pass
+    return datetime.now(timezone.utc)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

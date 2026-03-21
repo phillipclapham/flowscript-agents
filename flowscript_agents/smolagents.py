@@ -19,11 +19,17 @@ Note: Requires smolagents package: pip install flowscript-agents[smolagents]
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from smolagents import Tool as _SmolBaseTool
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 class FlowScriptMemoryTools:
@@ -38,6 +44,16 @@ class FlowScriptMemoryTools:
         tensions = tools.memory.query.tensions()
         blocked = tools.memory.query.blocked()
 
+    For vector-powered search and auto-extraction::
+
+        from flowscript_agents.embeddings import OpenAIEmbeddings
+
+        tools = FlowScriptMemoryTools(
+            "./agent-memory.json",
+            embedder=OpenAIEmbeddings(),
+            llm=my_llm_fn,
+        )
+
     For semantic queries, use resolve() to build relationships::
 
         ref = tools.resolve("chose Redis")
@@ -45,11 +61,34 @@ class FlowScriptMemoryTools:
             ref.decide(rationale="Speed critical")
     """
 
-    def __init__(self, file_path: str | None = None) -> None:
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+    def __init__(
+        self,
+        file_path: str | None = None,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
+    ) -> None:
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         self._file_path = file_path
         self._memory.session_start()
 
@@ -57,6 +96,11 @@ class FlowScriptMemoryTools:
     def memory(self) -> Memory:
         """Access the underlying FlowScript Memory for semantic queries."""
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     def resolve(self, content: str) -> NodeRef | None:
         """Resolve stored content to a FlowScript NodeRef for semantic operations.
@@ -76,19 +120,27 @@ class FlowScriptMemoryTools:
         ToolCallingAgent via the tools parameter.
         """
         return [
-            _StoreMemoryTool(self._memory),
-            _RecallMemoryTool(self._memory),
+            _StoreMemoryTool(self._memory, self._unified),
+            _RecallMemoryTool(self._memory, self._unified),
             _QueryTensionsTool(self._memory),
             _QueryBlockedTool(self._memory),
-            _GetMemoryContextTool(self._memory),
+            _GetMemoryContextTool(self._memory, self._unified),
+            _QueryWhyTool(self._memory),
+            _QueryWhatIfTool(self._memory),
+            _QueryAlternativesTool(self._memory),
         ]
 
     def save(self) -> None:
-        """Persist memory to disk."""
-        self._memory.save()
+        """Persist memory to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 
@@ -105,9 +157,10 @@ class _BaseFSTool(_SmolBaseTool):
     inputs: dict = {}
     output_type: str = "string"
 
-    def __init__(self, memory: Memory) -> None:
+    def __init__(self, memory: Memory, unified: Any = None) -> None:
         super().__init__()
         self._memory = memory
+        self._unified = unified
 
     def forward(self, **kwargs: Any) -> str:
         raise NotImplementedError
@@ -133,10 +186,18 @@ class _StoreMemoryTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, content: str, category: str = "observation") -> str:
+        # Use auto-extraction when available
+        if self._unified and self._unified.extractor:
+            result = self._unified.add(content, metadata={"category": category})
+            return f"Stored in memory: [{category}] {result.nodes_created} nodes extracted"
+
         ref = self._memory.thought(content)
         if category:
             ref.node.ext = ref.node.ext or {}
             ref.node.ext["smolagents_category"] = category
+        # Index for vector search if available
+        if self._unified and self._unified.vector_index:
+            self._unified.vector_index.index_node(ref.id)
         preview = content[:80] + ("..." if len(content) > 80 else "")
         return f"Stored in memory: [{category}] {preview}"
 
@@ -161,8 +222,23 @@ class _RecallMemoryTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, query: str, limit: int = 5) -> str:
-        # Word-level search: split query into words, match nodes containing
-        # any query word, score by proportion of words matched.
+        # Use unified search when available (vector + keyword + temporal)
+        if self._unified:
+            unified_results = self._unified.search(query, top_k=limit)
+            if not unified_results:
+                return "No relevant memories found."
+            self._memory.touch_nodes_session_scoped(
+                [r.node_id for r in unified_results]
+            )
+            lines = []
+            for r in unified_results:
+                meta = self._memory.temporal_map.get(r.node_id)
+                tier = meta.tier if meta else "current"
+                freq = meta.frequency if meta else 1
+                lines.append(f"[{tier}, freq={freq}] {r.content}")
+            return "\n".join(lines)
+
+        # Fallback: word-level search
         query_words = [w.lower() for w in query.split() if len(w) > 2]
         scored: list[tuple] = []
         if query_words:
@@ -237,6 +313,10 @@ class _GetMemoryContextTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, max_tokens: int = 4000) -> str:
+        if self._unified:
+            ctx = self._unified.get_context(max_tokens=max_tokens)
+            return ctx if ctx else "Memory is empty — no past context available."
+
         if self._memory.size == 0:
             return "Memory is empty — no past context available."
 
@@ -253,3 +333,72 @@ class _GetMemoryContextTool(_BaseFSTool):
             lines.append(line)
             used += len(line)
         return "\n".join(lines) if lines else "Memory is empty — no past context available."
+
+
+class _QueryWhyTool(_BaseFSTool):
+    name = "query_why"
+    description = (
+        "Trace why something happened — follow causal chains backward from a "
+        "node to its root cause. Requires causal relationships to have been "
+        "built via the resolve() API."
+    )
+    inputs = {
+        "content": {
+            "type": "string",
+            "description": "Content of the memory node to trace causes for.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, content: str) -> str:
+        matches = self._memory.find_nodes(content)
+        if not matches:
+            return f"No memory found matching '{content}'. Store it first, then build causal relationships with resolve()."
+        result = self._memory.query.why(matches[0].id)
+        return str(result)
+
+
+class _QueryWhatIfTool(_BaseFSTool):
+    name = "query_what_if"
+    description = (
+        "Explore downstream impact — what would be affected if this node "
+        "changed? Traces causal chains forward. Requires relationships to "
+        "have been built via the resolve() API."
+    )
+    inputs = {
+        "content": {
+            "type": "string",
+            "description": "Content of the memory node to trace effects from.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, content: str) -> str:
+        matches = self._memory.find_nodes(content)
+        if not matches:
+            return f"No memory found matching '{content}'. Store it first, then build causal relationships with resolve()."
+        result = self._memory.query.what_if(matches[0].id)
+        return str(result)
+
+
+class _QueryAlternativesTool(_BaseFSTool):
+    name = "query_alternatives"
+    description = (
+        "Find alternatives for a question or decision point. Returns "
+        "alternatives with their states (decided, blocked, exploring, etc.). "
+        "Requires alternatives to have been created via the resolve() API."
+    )
+    inputs = {
+        "content": {
+            "type": "string",
+            "description": "Content of the question node to find alternatives for.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, content: str) -> str:
+        matches = self._memory.find_nodes(content)
+        if not matches:
+            return f"No memory found matching '{content}'. Store a question first, then add alternatives with resolve()."
+        result = self._memory.query.alternatives(matches[0].id)
+        return str(result)

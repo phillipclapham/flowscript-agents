@@ -121,7 +121,7 @@ class TestResolve:
 class TestMemoryTools:
     def test_create_memory_tools_returns_functions(self):
         tools = create_memory_tools()
-        assert len(tools) == 4
+        assert len(tools) == 7
         assert all(callable(t) for t in tools)
 
     def test_tool_names(self):
@@ -131,6 +131,9 @@ class TestMemoryTools:
         assert "recall_memory" in names
         assert "query_tensions" in names
         assert "query_blocked" in names
+        assert "query_why" in names
+        assert "query_what_if" in names
+        assert "query_alternatives" in names
 
     @pytest.mark.asyncio
     async def test_store_tool(self):

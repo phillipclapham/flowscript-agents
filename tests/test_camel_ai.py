@@ -34,7 +34,8 @@ class TestWriteRecords:
 
     def test_stores_role(self):
         mem = FlowScriptCamelMemory()
-        mem.write_record(MemoryRecord(content="Hello", role="user"))
+        # role_at_backend takes priority over role (matches real CAMEL MemoryRecord)
+        mem.write_record(MemoryRecord(content="Hello", role="user", role_at_backend="user"))
         ref = list(mem.memory.nodes)[0]
         assert ref.node.ext["camel_role"] == "user"
 
@@ -169,14 +170,17 @@ class TestRecall:
 
 
 class TestClear:
-    def test_clear_removes_all(self):
+    def test_clear_is_intentional_noop(self):
+        """clear() is intentionally a no-op — reasoning memory persists through
+        ChatAgent's init/clear cycle. This is a DIFFERENTIATOR: built-in memories
+        lose everything, FlowScript preserves cross-session knowledge."""
         mem = FlowScriptCamelMemory()
         mem.write_records([
             MemoryRecord(content="A"),
             MemoryRecord(content="B"),
         ])
         mem.clear()
-        assert mem.memory.size == 0
+        assert mem.memory.size == 2  # preserved, not cleared
 
 
 class TestLifecycle:

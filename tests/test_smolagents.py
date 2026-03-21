@@ -26,7 +26,7 @@ class TestFlowScriptMemoryTools:
     def test_tools_returns_list(self):
         tools = FlowScriptMemoryTools()
         tool_list = tools.tools()
-        assert len(tool_list) == 5
+        assert len(tool_list) == 8
 
     def test_tool_protocol(self):
         """Each tool has the smolagents Tool protocol attributes."""

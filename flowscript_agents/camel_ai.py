@@ -22,11 +22,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 from camel.memories.base import AgentMemory as _CamelAgentMemory
 
-from .memory import Memory, NodeRef
+from .memory import Memory, MemoryOptions, NodeRef
+
+if TYPE_CHECKING:
+    from .embeddings.providers import EmbeddingProvider
+    from .embeddings.extract import ExtractFn
+    from .embeddings.consolidate import ConsolidationProvider
+    from .unified import UnifiedMemory
 
 
 @dataclass
@@ -84,6 +90,11 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         *,
         window_size: int | None = None,
         max_tokens: int = 4096,
+        embedder: EmbeddingProvider | None = None,
+        llm: ExtractFn | None = None,
+        consolidation_provider: ConsolidationProvider | None = None,
+        options: MemoryOptions | None = None,
+        **unified_kwargs: Any,
     ) -> None:
         """Initialize FlowScript memory for CAMEL agents.
 
@@ -92,11 +103,29 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
             window_size: Max recent records to return from retrieve().
                 None = all records (within token budget).
             max_tokens: Token budget for context assembly.
+            embedder: Embedding provider for vector search.
+            llm: LLM function for auto-extraction.
+            consolidation_provider: Tool-calling LLM for consolidation.
+            options: MemoryOptions for the underlying Memory.
         """
-        if file_path:
-            self._memory = Memory.load_or_create(file_path)
+        self._unified: UnifiedMemory | None = None
+        if embedder or llm or consolidation_provider:
+            from .unified import UnifiedMemory as _UM
+
+            self._unified = _UM(
+                file_path=file_path,
+                embedder=embedder,
+                llm=llm,
+                consolidation_provider=consolidation_provider,
+                options=options,
+                **unified_kwargs,
+            )
+            self._memory = self._unified.memory
         else:
-            self._memory = Memory()
+            if file_path:
+                self._memory = Memory.load_or_create(file_path, options=options)
+            else:
+                self._memory = Memory(options=options)
         self._file_path = file_path
         self._window_size = window_size
         self._max_tokens = max_tokens
@@ -107,6 +136,11 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
     def memory(self) -> Memory:
         """Access the underlying FlowScript Memory."""
         return self._memory
+
+    @property
+    def unified(self) -> UnifiedMemory | None:
+        """Access UnifiedMemory for vector search + extraction. None if not configured."""
+        return self._unified
 
     @property
     def agent_id(self) -> str | None:
@@ -233,54 +267,70 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
     def write_records(self, records: list[Any]) -> None:
         """Store records from agent conversation.
 
-        Called by ChatAgent after each turn. Each record becomes a
-        FlowScript node. Handles both real CAMEL MemoryRecord objects
-        (record.message.content) and our duck-typed MemoryRecord
-        (record.content).
+        When UnifiedMemory is configured with an LLM, uses auto-extraction
+        for typed reasoning nodes. Otherwise stores as thought nodes.
 
         Args:
             records: List of MemoryRecord-like objects.
         """
-        prev_ref = None
+        # Extract content from all records
+        contents = []
         for record in records:
-            # Real CAMEL MemoryRecord: record.message.content
-            # Duck-typed MemoryRecord: record.content
             msg = getattr(record, "message", None)
             if msg is not None:
                 content = getattr(msg, "content", None) or str(msg)
             else:
                 content = getattr(record, "content", str(record))
-            if not content:
-                continue
+            if content:
+                role_backend = getattr(record, "role_at_backend", None)
+                if role_backend is not None:
+                    role = getattr(role_backend, "value", str(role_backend))
+                else:
+                    role = getattr(record, "role", "assistant")
+                contents.append((content, role))
 
-            # Real CAMEL: record.role_at_backend (enum)
-            # Duck-typed: record.role (str)
-            role_backend = getattr(record, "role_at_backend", None)
-            if role_backend is not None:
-                # OpenAIBackendRole enum → string value
-                role = getattr(role_backend, "value", str(role_backend))
-            else:
-                role = getattr(record, "role", "assistant")
-            agent_id = getattr(record, "agent_id", self._agent_id or "")
+        if not contents:
+            return
 
-            ref = self._memory.thought(content)
-            node = ref.node
-            node.ext = node.ext or {}
-            node.ext.update({
-                "camel_role": str(role),
-                "camel_agent_id": agent_id,
-            })
+        camel_meta = {"camel_agent_id": self._agent_id or ""}
 
-            extra = getattr(record, "extra_info", None)
-            if extra and isinstance(extra, dict):
-                node.ext["camel_extra"] = extra
+        # Use auto-extraction when available
+        if self._unified and self._unified.extractor:
+            combined = "\n".join(f"[{role}] {c}" for c, role in contents)
+            roles = list(set(role for _, role in contents))
+            actor = "agent"
+            result = self._unified.add(combined, metadata=camel_meta, actor=actor)
+            # Tag extracted nodes with metadata + roles
+            for node_id in result.node_ids:
+                node = self._memory.get_node(node_id)
+                if node:
+                    node.ext = node.ext or {}
+                    node.ext.update(camel_meta)
+                    node.ext["camel_roles"] = roles
+        else:
+            prev_ref = None
+            for content, role in contents:
+                ref = self._memory.thought(content)
+                node = ref.node
+                node.ext = node.ext or {}
+                node.ext.update({
+                    "camel_role": str(role),
+                    **camel_meta,
+                })
 
-            if prev_ref:
-                prev_ref.then(ref)
-            prev_ref = ref
+                # Index for vector search if available
+                if self._unified and self._unified.vector_index:
+                    self._unified.vector_index.index_node(ref.id)
+
+                if prev_ref:
+                    prev_ref.then(ref)
+                prev_ref = ref
 
         if self._file_path:
-            self._memory.save()
+            if self._unified:
+                self._unified.save()
+            else:
+                self._memory.save()
 
     def write_record(self, record: Any) -> None:
         """Store a single record."""
@@ -327,7 +377,30 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
     # -- Additional convenience methods --
 
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Search memory with word-level matching."""
+        """Search memory for relevant content.
+
+        Uses unified search (vector + keyword + temporal) when available,
+        falls back to word-level matching.
+        """
+        if self._unified:
+            unified_results = self._unified.search(query, top_k=limit)
+            if unified_results:
+                self._memory.touch_nodes_session_scoped(
+                    [r.node_id for r in unified_results]
+                )
+            results = []
+            for r in unified_results:
+                meta = self._memory.temporal_map.get(r.node_id)
+                results.append({
+                    "content": r.content,
+                    "id": r.node_id,
+                    "tier": meta.tier if meta else "current",
+                    "frequency": meta.frequency if meta else 1,
+                    "score": r.combined_score,
+                })
+            return results
+
+        # Fallback: word-level matching
         query_words = [w.lower() for w in query.split() if len(w) > 2]
         scored: list[tuple[NodeRef, float]] = []
         if query_words:
@@ -354,11 +427,16 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         return results
 
     def save(self) -> None:
-        """Persist to disk."""
-        self._memory.save()
+        """Persist to disk. No-op if no file_path was provided (in-memory mode)."""
+        if self._unified:
+            self._unified.save()
+        elif self._memory.file_path:
+            self._memory.save()
 
     def close(self):
         """End session: prune dormant, save. Returns SessionWrapResult."""
+        if self._unified:
+            return self._unified.close()
         return self._memory.session_wrap()
 
 

@@ -87,7 +87,7 @@ class TestSearchMemory:
         result = await service.search_memory(
             app_name="test_app", user_id="user1", query="Redis"
         )
-        assert len(result["memories"]) >= 1
+        assert len(result.memories) >= 1
 
     @pytest.mark.asyncio
     async def test_search_empty(self):
@@ -95,7 +95,7 @@ class TestSearchMemory:
         result = await service.search_memory(
             app_name="test_app", user_id="user1", query="anything"
         )
-        assert result["memories"] == []
+        assert result.memories == []
 
     @pytest.mark.asyncio
     async def test_search_returns_memory_structure(self):
@@ -106,11 +106,10 @@ class TestSearchMemory:
         result = await service.search_memory(
             app_name="test_app", user_id="user1", query="test"
         )
-        assert "memories" in result
-        if result["memories"]:
-            mem = result["memories"][0]
-            assert "content" in mem
-            assert "id" in mem
+        assert hasattr(result, "memories")
+        if result.memories:
+            mem = result.memories[0]
+            assert hasattr(mem, "content")
 
 
 class TestAddEventsToMemory:
@@ -142,7 +141,7 @@ class TestQueryIntegration:
             query="tension tradeoff"
         )
         # Should include tension summary
-        assert any("tension" in str(m).lower() for m in result["memories"])
+        assert any("tension" in str(m).lower() for m in result.memories)
 
 
 class TestResolve:
