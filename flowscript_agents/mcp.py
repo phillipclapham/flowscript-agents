@@ -353,7 +353,8 @@ class MCPHandler:
         }
 
     def _add_memory(self, args: dict) -> dict:
-        text = args.get("text", "")
+        # Accept both "text" and "content" — LLMs frequently use "content"
+        text = args.get("text", "") or args.get("content", "")
         if not text or not text.strip():
             return {"error": "text is required and must not be empty"}
         metadata = args.get("metadata")
