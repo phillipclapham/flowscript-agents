@@ -1,0 +1,43 @@
+# FlowScript Memory — CLAUDE.md Snippet
+#
+# Paste the section below into your project's CLAUDE.md to enable
+# proactive reasoning memory. FlowScript MCP tools are available
+# when the server is configured in your Claude Code settings.
+
+## Reasoning Memory (FlowScript)
+
+This project uses FlowScript for persistent reasoning memory across sessions.
+The FlowScript MCP server provides tools for building and querying a
+structured reasoning graph — not just what happened, but why, what's
+blocked, and what tradeoffs exist.
+
+**Session workflow:**
+- **Start of session:** Call `get_context` to load prior reasoning, or
+  `search_memory` for specific topics. Check `query_blocked` for
+  outstanding blockers.
+- **During work:** Call `add_memory` when important decisions are made,
+  architectural tradeoffs are discussed, blockers are identified, or
+  causal relationships emerge. Include full context — the extraction
+  layer automatically types the reasoning structure.
+- **Before decisions:** Call `query_tensions` to surface prior tradeoffs
+  and `search_memory` to check for relevant prior reasoning.
+- **When asked "why":** Call `query_why` to trace causal chains, or
+  `query_alternatives` to see what options were considered.
+- **When considering changes:** Call `query_what_if` to trace downstream
+  consequences before committing.
+- **To correct mistakes:** Call `remove_memory` with a node_id (use
+  `search_memory` first to find it) to remove incorrect or outdated entries.
+- **End of session:** Call `session_wrap` to prune dormant nodes and
+  keep memory healthy. This archives inactive nodes, not deletes them.
+
+**What to remember (call `add_memory`):**
+- Decisions and their rationale ("We chose PostgreSQL because...")
+- Tradeoffs and tensions ("Speed vs. cost: Redis is faster but...")
+- Blockers ("Deployment blocked on API key approval")
+- Causal reasoning ("Switching to GraphQL caused N+1 query issues")
+- Architecture choices and constraints
+
+**What NOT to remember:**
+- Routine code changes (git tracks those)
+- Transient debugging state
+- Information already in documentation
