@@ -246,6 +246,12 @@ class FlowScriptSession:
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def _extract_item_content(item: dict[str, Any]) -> str | None:
     """Extract text content from an OpenAI response input item."""

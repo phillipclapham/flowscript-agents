@@ -360,6 +360,12 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def _extract_event_content(event: Any) -> str | None:
     """Extract text content from an ADK event."""

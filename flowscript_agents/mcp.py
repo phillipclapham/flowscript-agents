@@ -11,16 +11,19 @@ Full config:
     python -m flowscript_agents.mcp --memory ./agent.json \\
         --embedder openai --llm-model gpt-4o-mini
 
-Configure in Claude Code settings (.claude/settings.local.json):
+Configure in your project's .mcp.json (project-level, shareable):
 {
   "mcpServers": {
     "flowscript": {
+      "type": "stdio",
       "command": "python3",
       "args": ["-m", "flowscript_agents.mcp", "--memory", "./agent-memory.json"],
       "env": { "OPENAI_API_KEY": "sk-..." }
     }
   }
 }
+
+Or in ~/.claude.json for global (all projects) configuration.
 
 When OPENAI_API_KEY is set, the server auto-configures:
 - OpenAI embeddings (text-embedding-3-small) for vector search
@@ -706,6 +709,9 @@ def run_server(
         llm=llm,
         consolidation_provider=consolidation_provider,
     )
+    # Start session tracking — enables touch deduplication and temporal
+    # intelligence across the lifetime of this MCP server instance.
+    umem.memory.session_start()
     handler = MCPHandler(umem)
 
     for line in sys.stdin:

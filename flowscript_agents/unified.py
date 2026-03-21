@@ -271,6 +271,12 @@ class UnifiedMemory:
             self._vector_index.save()
         return result
 
+    def __enter__(self) -> "UnifiedMemory":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
     # -- Convenience delegations --
 
     @property

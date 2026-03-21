@@ -385,6 +385,12 @@ class FlowScriptStore(BaseStore):
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 class _StoredItem:
     """Internal storage for items with their metadata."""

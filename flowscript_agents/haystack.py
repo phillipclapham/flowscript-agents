@@ -396,6 +396,12 @@ class FlowScriptMemoryStore:
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def _extract_content(msg: Any) -> str | None:
     """Extract text content from a ChatMessage or dict."""

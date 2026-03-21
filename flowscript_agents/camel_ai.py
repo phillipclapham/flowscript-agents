@@ -439,6 +439,12 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 class _SimpleContextCreator:
     """Minimal context creator that assembles records into messages."""

@@ -260,6 +260,12 @@ class FlowScriptDeps:
             return self._unified.close()
         return self._memory.session_wrap()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def create_memory_tools() -> list:
     """Create tool functions for FlowScript memory operations.
