@@ -255,9 +255,14 @@ mem.save()    # persist to disk
 | Framework | When to prune/save | How |
 |:----------|:-------------------|:----|
 | **LangGraph** | After your graph run completes | `store.memory.prune(); store.memory.save()` |
-| **CrewAI** | After crew kickoff finishes | `storage.memory.prune(); storage.memory.save()` |
+| **CrewAI** | After crew kickoff finishes | `storage.memory.prune(); storage.save_to_disk()` |
 | **Google ADK** | After runner session ends | `service.memory.prune(); service.memory.save()` |
 | **OpenAI Agents** | After conversation turn/session | `session.memory.prune(); session.memory.save()` |
+| **Pydantic AI** | After agent.run() completes | `deps.close()` or `deps.memory.prune(); deps.save()` |
+| **smolagents** | After agent run completes | `tools.close()` or `tools.memory.prune(); tools.save()` |
+| **LlamaIndex** | After agent.chat() session | `block.close()` or `block.memory.prune(); block.save()` |
+| **Haystack** | After pipeline.run() completes | `store.close()` or `store.memory.prune(); store.save()` |
+| **CAMEL-AI** | After ChatAgent session | `memory.close()` or `memory.save()` |
 
 All adapters auto-save on `put`/`save`/`add_items` operations. Explicit `prune() + save()` at session boundaries keeps the memory garden healthy.
 
@@ -266,7 +271,7 @@ All adapters auto-save on `put`/`save`/`add_items` operations. Explicit `prune()
 ## Ecosystem
 
 - **[flowscript-core](https://www.npmjs.com/package/flowscript-core)** — TypeScript SDK with `Memory` class, `asTools()` (12 OpenAI-format tools), token budgeting, audit trail
-- **[flowscript-ldp](https://pypi.org/project/flowscript-ldp/)** — Python IR types + query engine (the foundation this package builds on)
+- **[flowscript-ldp](https://pypi.org/project/flowscript-ldp/)** — LDP Mode 3 reference implementation (historical artifact, v0.2.1 frozen)
 - **[flowscript.org](https://flowscript.org)** — Web editor, D3 visualization, live query panel
 
 ---
