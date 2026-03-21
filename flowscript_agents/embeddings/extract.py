@@ -110,7 +110,10 @@ Given text from an AI agent conversation or human input, extract the reasoning s
 
 ## Relationship Types
 - causes: A causes or leads to B
-- tension: A and B are in tension on some axis (MUST include axis label)
+- tension: A and B are in tension on some axis (MUST include axis label). IMPORTANT:
+  tension is a RELATIONSHIP between TWO separate nodes, not a node type. When you
+  identify a tradeoff (e.g., "X is faster but Y is simpler"), create two nodes for
+  the competing concerns and a tension relationship between them with an axis label.
 - derives_from: B is derived from or based on A
 - alternative: B is an alternative answer to question A
 
@@ -146,6 +149,24 @@ Relationship source/target and state node are zero-based indices into the nodes 
 For tension relationships, include "axis": "..." describing what they're in tension about.
 For blocked states, include "reason": "..." instead of "rationale".
 If no meaningful structure exists, return {"nodes": [], "relationships": [], "states": []}.
+
+## Example: Tradeoff Extraction
+Input: "We chose Redis over Memcached. Redis has persistence but higher memory usage."
+Output:
+{
+  "nodes": [
+    {"type": "decision", "content": "Chose Redis over Memcached."},
+    {"type": "thought", "content": "Redis has persistence."},
+    {"type": "thought", "content": "Redis has higher memory usage."}
+  ],
+  "relationships": [
+    {"type": "causes", "source": 1, "target": 0},
+    {"type": "tension", "source": 1, "target": 2, "axis": "capability vs resource cost"}
+  ],
+  "states": [
+    {"type": "decided", "node": 0, "rationale": "Persistence outweighs memory cost."}
+  ]
+}
 """
 
 # Actor-specific suffixes that tune extraction for different input sources.
@@ -286,30 +307,71 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
     nodes: list[ExtractedNode] = []
     relationships: list[ExtractedRelationship] = []
 
-    # Parse nodes
+    # Parse nodes — track index remapping when tension nodes get split.
+    # raw_idx_to_new maps original node index → new index (or first of pair for splits)
+    _raw_idx_to_new: dict[int, int] = {}
+    raw_idx = -1
+
     for item in raw.get("nodes", []):
         if not isinstance(item, dict):
             continue
+        raw_idx += 1
         node_type = str(item.get("type", "thought")).lower()
         content = str(item.get("content", "")).strip()
         if not content:
+            _raw_idx_to_new[raw_idx] = len(nodes)  # map even if skipped
             continue
-        # Normalize type
+
+        # Handle LLM mistake: "tension" as node type instead of relationship.
+        # If content contains "vs" pattern, split into two nodes + tension relationship.
+        if node_type == "tension":
+            axis = item.get("axis", "")
+            split_done = False
+            for sep in (" vs ", " vs. ", " versus "):
+                if sep in content.lower():
+                    idx = content.lower().index(sep)
+                    part_a = content[:idx].strip().rstrip(".")
+                    part_b = content[idx + len(sep):].strip().rstrip(".")
+                    if part_a and part_b:
+                        a_idx = len(nodes)
+                        _raw_idx_to_new[raw_idx] = a_idx
+                        nodes.append(ExtractedNode(type="thought", content=part_a))
+                        b_idx = len(nodes)
+                        nodes.append(ExtractedNode(type="thought", content=part_b))
+                        if not axis:
+                            axis = f"{part_a[:30]} vs {part_b[:30]}"
+                        relationships.append(ExtractedRelationship(
+                            type="tension", source_idx=a_idx, target_idx=b_idx,
+                            axis=str(axis),
+                        ))
+                        split_done = True
+                        break
+            if not split_done:
+                # No splittable pattern — keep as thought node
+                _raw_idx_to_new[raw_idx] = len(nodes)
+                nodes.append(ExtractedNode(type="thought", content=content))
+            continue
+
+        # Normalize unknown types to thought
         if node_type not in _VALID_NODE_TYPES:
             node_type = "thought"  # safe fallback
+        _raw_idx_to_new[raw_idx] = len(nodes)
         nodes.append(ExtractedNode(type=node_type, content=content))
 
-    # Parse relationships
+    # Parse relationships — remap indices when tension nodes were split
     for item in raw.get("relationships", []):
         if not isinstance(item, dict):
             continue
         rel_type = str(item.get("type", "")).lower()
         if rel_type not in _VALID_REL_TYPES:
             continue
-        source = item.get("source")
-        target = item.get("target")
-        if not isinstance(source, int) or not isinstance(target, int):
+        source_raw = item.get("source")
+        target_raw = item.get("target")
+        if not isinstance(source_raw, int) or not isinstance(target_raw, int):
             continue
+        # Remap indices through tension-split mapping
+        source = _raw_idx_to_new.get(source_raw, source_raw)
+        target = _raw_idx_to_new.get(target_raw, target_raw)
         if source < 0 or source >= len(nodes) or target < 0 or target >= len(nodes):
             continue
         if source == target:
@@ -326,15 +388,18 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
         )
 
-    # Parse states and attach to nodes
+    # Parse states and attach to nodes — remap indices
     for item in raw.get("states", []):
         if not isinstance(item, dict):
             continue
         state_type = str(item.get("type", "")).lower()
         if state_type not in _VALID_STATE_TYPES:
             continue
-        node_idx = item.get("node")
-        if not isinstance(node_idx, int) or node_idx < 0 or node_idx >= len(nodes):
+        node_idx_raw = item.get("node")
+        if not isinstance(node_idx_raw, int):
+            continue
+        node_idx = _raw_idx_to_new.get(node_idx_raw, node_idx_raw)
+        if node_idx < 0 or node_idx >= len(nodes):
             continue
         node = nodes[node_idx]
         node.state_type = state_type
