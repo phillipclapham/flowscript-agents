@@ -182,17 +182,7 @@ TOOLS = [
             "external dependencies. Returns blockers sorted by impact score "
             "(downstream effects), with reason, duration, and transitive causes."
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sort_by": {
-                    "type": "string",
-                    "enum": ["impact", "age"],
-                    "description": "Sort order (default: impact)",
-                    "default": "impact",
-                },
-            },
-        },
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "query_why",
@@ -395,8 +385,7 @@ class MCPHandler:
         return _serialize_query_result(result)
 
     def _query_blocked(self, args: dict) -> dict:
-        sort_by = args.get("sort_by", "impact")
-        result = self._umem.memory.query.blocked(sort_by=sort_by)
+        result = self._umem.memory.query.blocked()
         return _serialize_query_result(result)
 
     def _query_why(self, args: dict) -> dict:
