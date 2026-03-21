@@ -1276,3 +1276,106 @@ class TestAutoSave:
             # Load fresh — should have the node
             umem2 = UnifiedMemory(file_path=path)
             assert umem2.size >= 1
+
+
+# =============================================================================
+# Context Manager Tests
+# =============================================================================
+
+
+class TestContextManager:
+    """Test context manager protocol on UnifiedMemory."""
+
+    def test_with_block_saves_on_exit(self):
+        """Context manager should save on clean exit."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ctx_mgr.json")
+
+            with UnifiedMemory(file_path=path) as umem:
+                umem.memory.thought("test context manager")
+                assert umem.memory.size == 1
+
+            # After exiting with block, data should be persisted
+            umem2 = UnifiedMemory(file_path=path)
+            assert umem2.memory.size == 1
+
+    def test_with_block_runs_session_wrap_not_just_save(self):
+        """Context manager calls close() which runs session_wrap (prune + save),
+        not just save(). Verify by creating a node that's dormant under a tight
+        dormancy config — close() should prune it, while save() alone wouldn't."""
+        import tempfile, os
+        from datetime import datetime, timezone, timedelta
+        from flowscript_agents.memory import MemoryOptions, TemporalConfig, DormancyConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ctx_wrap.json")
+
+            # Create memory with extremely tight dormancy (1 second)
+            opts = MemoryOptions(
+                temporal=TemporalConfig(
+                    dormancy=DormancyConfig(
+                        resting="0d",
+                        dormant="0d",
+                        archive="0d",
+                    )
+                )
+            )
+            with UnifiedMemory(file_path=path, options=opts) as umem:
+                ref = umem.memory.thought("will be pruned")
+                # Backdate the temporal metadata so it's dormant
+                if ref.id in umem.memory._temporal_map:
+                    meta = umem.memory._temporal_map[ref.id]
+                    old_time = datetime.now(timezone.utc) - timedelta(days=1)
+                    meta.last_touched = old_time.isoformat()
+                    meta.frequency = 0
+                # Verify it's dormant before exit
+                garden = umem.memory.garden()
+                assert len(garden.dormant) == 1, "Node should be dormant"
+            # close() ran session_wrap which pruned the dormant node
+            umem2 = UnifiedMemory(file_path=path, options=opts)
+            assert umem2.memory.size == 0, "Dormant node should have been pruned by close()"
+
+    def test_with_block_propagates_exception(self):
+        """Context manager should not suppress exceptions from the with body."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ctx_exc.json")
+
+            with pytest.raises(ValueError, match="test error"):
+                with UnifiedMemory(file_path=path) as umem:
+                    umem.memory.thought("before error")
+                    raise ValueError("test error")
+
+            # Data should still be saved despite the exception
+            # (close() runs in __exit__ even on exception)
+            umem2 = UnifiedMemory(file_path=path)
+            assert umem2.memory.size >= 0  # may be 0 if pruned, but file exists
+            assert os.path.exists(path)
+
+    def test_close_failure_does_not_mask_original_exception(self):
+        """If both the with body and close() raise, the original exception wins."""
+        import unittest.mock as mock
+
+        umem = UnifiedMemory()
+        # Patch close to also raise
+        with mock.patch.object(umem, 'close', side_effect=OSError("disk full")):
+            with pytest.raises(ValueError, match="original error"):
+                with umem:
+                    raise ValueError("original error")
+
+    def test_close_failure_propagates_when_no_original_exception(self):
+        """If close() raises and there was no exception in the body, close error propagates."""
+        import unittest.mock as mock
+
+        umem = UnifiedMemory()
+        with mock.patch.object(umem, 'close', side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                with umem:
+                    pass  # no error in body
+
+    def test_enter_returns_self(self):
+        """__enter__ should return the UnifiedMemory instance."""
+        umem = UnifiedMemory()
+        result = umem.__enter__()
+        assert result is umem

@@ -249,8 +249,12 @@ class FlowScriptSession:
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
-        self.close()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.close()
+        except Exception:
+            if exc_type is None:
+                raise  # close() failure IS the error when no prior exception
 
 
 def _extract_item_content(item: dict[str, Any]) -> str | None:

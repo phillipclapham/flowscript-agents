@@ -29,7 +29,14 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Callable, Optional
+
+
+def _log(msg: str) -> None:
+    """Log to stderr."""
+    sys.stderr.write(f"[flowscript] {msg}\n")
+    sys.stderr.flush()
 
 from .memory import Memory, MemoryOptions, NodeRef
 from .embeddings.providers import EmbeddingProvider
@@ -266,16 +273,26 @@ class UnifiedMemory:
 
     def close(self) -> Any:
         """Full session wrap: prune + save memory + save embeddings."""
-        result = self._memory.session_wrap()
-        if self._memory.file_path and self._vector_index is not None:
-            self._vector_index.save()
+        try:
+            result = self._memory.session_wrap()
+        finally:
+            # Save vector index even if session_wrap fails — prevent
+            # memory/embeddings sidecar from getting out of sync.
+            if self._memory.file_path and self._vector_index is not None:
+                self._vector_index.save()
         return result
 
     def __enter__(self) -> "UnifiedMemory":
         return self
 
-    def __exit__(self, *exc: Any) -> None:
-        self.close()
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        try:
+            self.close()
+        except Exception:
+            if exc_type is None:
+                raise  # close() failure IS the error
+            # Original exception takes priority — log but don't mask it
+            _log("Warning: close() failed during exception handling")
 
     # -- Convenience delegations --
 

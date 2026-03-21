@@ -6,6 +6,8 @@ No external MCP SDK required — implements the protocol directly.
 
 Zero-config quick start (auto-detects OPENAI_API_KEY):
     python -m flowscript_agents.mcp --memory ./agent.json
+    # or, if installed via pip:
+    flowscript-mcp --memory ./agent.json
 
 Full config:
     python -m flowscript_agents.mcp --memory ./agent.json \\
@@ -366,13 +368,20 @@ class MCPHandler:
             return {"error": "text is required and must not be empty"}
         metadata = args.get("metadata")
         result = self._umem.add(text, metadata=metadata, actor="agent")
-        return {
+        resp: dict[str, Any] = {
             "nodes_created": result.nodes_created,
             "nodes_deduplicated": result.nodes_deduplicated,
             "relationships_created": result.relationships_created,
             "states_created": result.states_created,
             "node_ids": result.node_ids,
         }
+        # Hint when running without LLM (raw storage only)
+        if self._umem.extractor is None and result.nodes_created == 1:
+            resp["note"] = (
+                "Running without LLM — stored as raw text (no typed extraction). "
+                "Install openai and set OPENAI_API_KEY for automatic reasoning extraction."
+            )
+        return resp
 
     def _get_context(self, args: dict) -> dict:
         max_tokens = args.get("max_tokens", 4000)
@@ -714,67 +723,75 @@ def run_server(
     umem.memory.session_start()
     handler = MCPHandler(umem)
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
 
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            msg_id = msg.get("id")
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            if method == "initialize":
+                # Version negotiation: respond with client's version if we
+                # support it, otherwise our latest. Our tools-only server is
+                # compatible with all versions from 2024-11-05 onward.
+                client_version = params.get("protocolVersion", _PROTOCOL_VERSION)
+                resp = _jsonrpc_response(msg_id, {
+                    "protocolVersion": client_version if client_version >= _PROTOCOL_VERSION else _PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {
+                        "name": _SERVER_NAME,
+                        "version": _SERVER_VERSION,
+                    },
+                })
+            elif method == "notifications/initialized":
+                continue  # notification, no response
+            elif method == "tools/list":
+                resp = _jsonrpc_response(msg_id, {"tools": TOOLS})
+            elif method == "resources/list":
+                resp = _jsonrpc_response(msg_id, {"resources": []})
+            elif method == "prompts/list":
+                resp = _jsonrpc_response(msg_id, {"prompts": []})
+            elif method == "tools/call":
+                tool_name = params.get("name", "")
+                tool_args = params.get("arguments", {})
+                result = handler.handle_tool(tool_name, tool_args)
+                # Save after modifications
+                if tool_name in ("add_memory", "remove_memory", "session_wrap"):
+                    try:
+                        umem.save()
+                    except ValueError:
+                        pass  # in-memory mode, no file path — expected
+                    except OSError as e:
+                        _log(f"Warning: save failed: {e}")
+                is_error = "error" in result
+                call_result: dict[str, Any] = {
+                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                }
+                if is_error:
+                    call_result["isError"] = True
+                resp = _jsonrpc_response(msg_id, call_result)
+            elif method == "ping":
+                resp = _jsonrpc_response(msg_id, {})
+            else:
+                resp = _jsonrpc_error(msg_id, -32601, f"Method not found: {method}")
+
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+    finally:
+        # Safety net: save state when stdin closes (Claude Code exits).
+        # Use save() not close() — don't prune on unclean shutdown.
         try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        msg_id = msg.get("id")
-        method = msg.get("method", "")
-        params = msg.get("params", {})
-
-        if method == "initialize":
-            # Version negotiation: respond with client's version if we
-            # support it, otherwise our latest. Our tools-only server is
-            # compatible with all versions from 2024-11-05 onward.
-            client_version = params.get("protocolVersion", _PROTOCOL_VERSION)
-            resp = _jsonrpc_response(msg_id, {
-                "protocolVersion": client_version if client_version >= _PROTOCOL_VERSION else _PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {
-                    "name": _SERVER_NAME,
-                    "version": _SERVER_VERSION,
-                },
-            })
-        elif method == "notifications/initialized":
-            continue  # notification, no response
-        elif method == "tools/list":
-            resp = _jsonrpc_response(msg_id, {"tools": TOOLS})
-        elif method == "resources/list":
-            resp = _jsonrpc_response(msg_id, {"resources": []})
-        elif method == "prompts/list":
-            resp = _jsonrpc_response(msg_id, {"prompts": []})
-        elif method == "tools/call":
-            tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-            result = handler.handle_tool(tool_name, tool_args)
-            # Save after modifications
-            if tool_name in ("add_memory", "remove_memory", "session_wrap"):
-                try:
-                    umem.save()
-                except ValueError:
-                    pass  # in-memory mode, no file path — expected
-                except OSError as e:
-                    _log(f"Warning: save failed: {e}")
-            is_error = "error" in result
-            call_result: dict[str, Any] = {
-                "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
-            }
-            if is_error:
-                call_result["isError"] = True
-            resp = _jsonrpc_response(msg_id, call_result)
-        elif method == "ping":
-            resp = _jsonrpc_response(msg_id, {})
-        else:
-            resp = _jsonrpc_error(msg_id, -32601, f"Method not found: {method}")
-
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+            umem.save()
+        except Exception:
+            pass
 
 
 # =============================================================================
@@ -866,6 +883,19 @@ def main() -> None:
             _log("Check your API key and network connection. "
                  "Falling back to keyword-only search.")
             embedder = None
+
+    # Validate LLM at startup (lightweight probe — extraction, not full call)
+    if llm is not None:
+        try:
+            test_result = llm("Respond with OK.")
+            if test_result:
+                _log("LLM extraction provider validated successfully")
+        except Exception as e:
+            _log(f"ERROR: LLM extraction provider failed validation: {e}")
+            _log("Check your API key and network connection. "
+                 "Falling back to raw text storage (no typed extraction).")
+            llm = None
+            consolidation = None
 
     # Warn about degraded mode so developers know what they're getting
     if embedder is None:

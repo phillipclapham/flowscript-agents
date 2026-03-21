@@ -2,7 +2,7 @@
 
 **Drop-in reasoning memory for AI agent frameworks.**
 
-[![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
+[![Tests](https://img.shields.io/badge/tests-409%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
 ---
 
@@ -225,46 +225,66 @@ mem.save()                               # re-save to loaded path
 | CrewAI | `FlowScriptStorage` | `StorageBackend` (save/search/update/delete + scopes) |
 | Google ADK | `FlowScriptMemoryService` | `BaseMemoryService` (add_session/search_memory) |
 | OpenAI Agents | `FlowScriptSession` | `Session` (get_items/add_items/pop_item/clear) |
+| Pydantic AI | `FlowScriptDeps` | Deps + `create_memory_tools()` |
+| smolagents | `FlowScriptMemory` | 5 Tool-protocol classes |
+| LlamaIndex | `FlowScriptMemoryBlock` | `BaseMemoryBlock[str]` (get/put/truncate) |
+| Haystack | `FlowScriptMemoryStore` | `MemoryStore` (add/search/delete) |
+| CAMEL-AI | `FlowScriptCamelMemory` | `AgentMemory` (retrieve/write/get_context/clear) |
 
-All adapters expose `.memory` for direct FlowScript query access.
+All adapters expose `.memory` for direct FlowScript query access and support context managers (`with` blocks).
 
 ---
 
 ## Session Lifecycle
 
-Memory gets smarter when you use it. Every query touches returned nodes — incrementing frequency and updating timestamps. Nodes that keep getting queried graduate through tiers (`current` → `developing` → `proven` → `foundation`). Dormant nodes get pruned to an audit trail.
+Memory gets smarter every time you use it. Every query touches returned nodes — incrementing frequency and updating timestamps. Nodes that keep getting queried graduate through tiers:
 
-### Standalone Memory
+`current` → `developing` → `proven` → `foundation`
+
+After 5 sessions, your most-used decisions load first. After 20, your memory is a curated knowledge base, not a pile of notes. Dormant nodes get pruned to an audit trail — nothing is deleted, just archived.
+
+### The `with` Pattern (Recommended)
+
+All adapters and `UnifiedMemory` support context managers. Session lifecycle is automatic:
 
 ```python
-mem = Memory.load_or_create("./memory.json")
+from flowscript_agents.langgraph import FlowScriptStore
 
-# Start of session: query to orient
-blockers = mem.query.blocked()    # touches returned nodes
-tensions = mem.query.tensions()   # touches returned nodes
-
-# ... agent does work, adds decisions, queries reasoning ...
-
-# End of session: prune dormant + save
-mem.prune()   # dormant nodes → audit trail
-mem.save()    # persist to disk
+with FlowScriptStore("./agent-memory.json") as store:
+    # session_start() called automatically on construction
+    store.put(("agents",), "decision", {"value": "chose Redis"})
+    results = store.search(("agents",), query="database")
+    # ... your agent does work ...
+# close() called automatically: prunes dormant nodes + saves to disk
 ```
 
-### Per-Framework Guidance
+This works the same way for all adapters:
 
-| Framework | When to prune/save | How |
-|:----------|:-------------------|:----|
-| **LangGraph** | After your graph run completes | `store.memory.prune(); store.memory.save()` |
-| **CrewAI** | After crew kickoff finishes | `storage.memory.prune(); storage.save_to_disk()` |
-| **Google ADK** | After runner session ends | `service.memory.prune(); service.memory.save()` |
-| **OpenAI Agents** | After conversation turn/session | `session.memory.prune(); session.memory.save()` |
-| **Pydantic AI** | After agent.run() completes | `deps.close()` or `deps.memory.prune(); deps.save()` |
-| **smolagents** | After agent run completes | `tools.close()` or `tools.memory.prune(); tools.save()` |
-| **LlamaIndex** | After agent.chat() session | `block.close()` or `block.memory.prune(); block.save()` |
-| **Haystack** | After pipeline.run() completes | `store.close()` or `store.memory.prune(); store.save()` |
-| **CAMEL-AI** | After ChatAgent session | `memory.close()` or `memory.save()` |
+```python
+with FlowScriptStorage("./memory.json") as storage:     # CrewAI
+with FlowScriptMemoryService("./memory.json") as svc:    # Google ADK
+with FlowScriptSession("id", "./memory.json") as sess:   # OpenAI Agents
+with FlowScriptDeps("./memory.json") as deps:            # Pydantic AI
+with FlowScriptMemory("./memory.json") as mem:           # smolagents
+with FlowScriptMemoryStore("./memory.json") as store:    # Haystack
+with FlowScriptCamelMemory("./memory.json") as mem:      # CAMEL-AI
+```
 
-All adapters auto-save on `put`/`save`/`add_items` operations. Explicit `prune() + save()` at session boundaries keeps the memory garden healthy.
+### Manual Lifecycle
+
+If you can't use `with` blocks (long-running services, notebooks):
+
+```python
+store = FlowScriptStore("./agent-memory.json")
+# session_start() called automatically on construction
+
+# ... work happens, auto-saves on each put/add ...
+
+# End of session: call close() explicitly
+store.close()  # prunes dormant nodes + saves
+```
+
+All adapters auto-save on `put`/`save`/`add_items` operations, so data is never lost between calls. `close()` adds the pruning step that keeps memory healthy over time.
 
 ---
 
