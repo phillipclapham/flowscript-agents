@@ -1,6 +1,6 @@
 # flowscript-agents
 
-**Your agent remembered the answer. It forgot the reasoning.**
+**Agent memory that tracks why you decided, what conflicts, and what's blocked. Not just what was said.**
 
 [![Tests](https://img.shields.io/badge/tests-581%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
