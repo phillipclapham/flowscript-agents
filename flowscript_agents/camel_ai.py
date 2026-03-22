@@ -294,19 +294,32 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
 
         camel_meta = {"camel_agent_id": self._agent_id or ""}
 
+        # Collect extra_info from records for preservation
+        extras_by_content: dict[str, dict] = {}
+        for record in records:
+            extra = getattr(record, "extra_info", None)
+            if extra:
+                content = getattr(record, "content", None) or str(record)
+                extras_by_content[content] = extra
+
         # Use auto-extraction when available
         if self._unified and self._unified.extractor:
             combined = "\n".join(f"[{role}] {c}" for c, role in contents)
             roles = list(set(role for _, role in contents))
             actor = "agent"
             result = self._unified.add(combined, metadata=camel_meta, actor=actor)
-            # Tag extracted nodes with metadata + roles
+            # Tag extracted nodes with metadata + roles + extra_info
+            all_extras = {}
+            for ex in extras_by_content.values():
+                all_extras.update(ex)
             for node_id in result.node_ids:
                 node = self._memory.get_node(node_id)
                 if node:
                     node.ext = node.ext or {}
                     node.ext.update(camel_meta)
                     node.ext["camel_roles"] = roles
+                    if all_extras:
+                        node.ext["camel_extra"] = all_extras
         else:
             prev_ref = None
             for content, role in contents:
@@ -317,6 +330,10 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
                     "camel_role": str(role),
                     **camel_meta,
                 })
+                # Preserve extra_info from the record
+                extra = extras_by_content.get(content)
+                if extra:
+                    node.ext["camel_extra"] = extra
 
                 # Index for vector search if available
                 if self._unified and self._unified.vector_index:

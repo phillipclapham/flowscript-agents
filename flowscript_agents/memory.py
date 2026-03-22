@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from .audit import AuditConfig, AuditQueryResult, AuditVerifyResult, AuditWriter
 from .query import QueryEngine
 from .types import (
     IR,
@@ -85,6 +86,7 @@ class MemoryOptions:
     source_file: Optional[str] = None
     author: Optional[dict[str, str]] = None  # {agent, role}
     touch_on_query: bool = True
+    audit: Optional[AuditConfig] = None  # Audit trail config (active when file_path set)
 
 
 # =============================================================================
@@ -308,6 +310,9 @@ class Memory:
         self._query_engine = QueryEngine()
         self._dirty = True
         self._session_touch_set: set[str] = set()
+        self._audit_writer: Optional[AuditWriter] = None
+        self._session_id: Optional[str] = None
+        self._adapter_context: Optional[dict[str, str]] = None
 
         # Resolve dormancy config
         dormancy = self._config.temporal.dormancy if self._config.temporal else None
@@ -347,6 +352,33 @@ class Memory:
             return None
         p = Path(self._file_path)
         return str(p.parent / (p.stem + ".audit.jsonl"))
+
+    def _ensure_audit_writer(self) -> Optional[AuditWriter]:
+        """Lazily create AuditWriter when file_path is set."""
+        if self._audit_writer is not None:
+            return self._audit_writer
+        if self._file_path:
+            self._audit_writer = AuditWriter(
+                Path(self._file_path),
+                config=self._config.audit,
+            )
+        return self._audit_writer
+
+    def set_adapter_context(self, framework: str, adapter_class: str, operation: str) -> None:
+        """Set adapter attribution for subsequent audit events.
+
+        Call this from adapters before operations so audit entries include
+        framework context. Call clear_adapter_context() when done.
+        """
+        self._adapter_context = {
+            "framework": framework,
+            "adapter_class": adapter_class,
+            "operation": operation,
+        }
+
+    def clear_adapter_context(self) -> None:
+        """Clear adapter attribution."""
+        self._adapter_context = None
 
     # -- Static constructors --
 
@@ -393,10 +425,19 @@ class Memory:
 
     @staticmethod
     def load_or_create(file_path: str, options: Optional[MemoryOptions] = None) -> Memory:
-        """Load existing memory or create empty. Zero-friction entry point."""
+        """Load existing memory or create empty. Zero-friction entry point.
+
+        Note: AuditConfig (on_event, rotation, verbosity) is applied from options
+        even on load, since callbacks and runtime config cannot be serialized.
+        """
         path = Path(file_path)
         if path.exists():
-            return Memory.load(str(path))
+            mem = Memory.load(str(path))
+            # Apply audit config from caller — AuditConfig can't be serialized
+            # (on_event callbacks, runtime settings) so it must come from caller
+            if options and options.audit:
+                mem._config.audit = options.audit
+            return mem
         mem = Memory(options=options)
         mem._file_path = str(path.resolve())
         return mem
@@ -465,7 +506,7 @@ class Memory:
 
     # -- Node creation --
 
-    def _add_node(self, content: str, node_type: NodeType) -> NodeRef:
+    def _add_node(self, content: str, node_type: NodeType, source: str = "api") -> NodeRef:
         node_id = _hash_content(content, node_type.value)
         if node_id in self._nodes:
             return NodeRef(self, self._nodes[node_id])
@@ -488,6 +529,15 @@ class Memory:
         )
 
         self._dirty = True
+
+        # Audit: node creation
+        self._write_audit("node_create", {
+            "node_id": node_id,
+            "node_type": node_type.value,
+            "content": content,
+            "source": source,
+        })
+
         return NodeRef(self, node)
 
     def thought(self, content: str) -> NodeRef:
@@ -554,6 +604,15 @@ class Memory:
         self._relationships.append(rel)
         self._dirty = True
 
+        # Audit: relationship creation
+        self._write_audit("relationship_create", {
+            "relationship_id": rel_id,
+            "type": rel_type.value,
+            "source": source_id,
+            "target": target_id,
+            "axis_label": axis_label,
+        })
+
     def tension(
         self, a: NodeRef | str, b: NodeRef | str, axis: str
     ) -> None:
@@ -588,6 +647,13 @@ class Memory:
         raw = f"{state_type.value}:{node_id}"
         state_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+        # Capture previous state for audit BEFORE removal
+        previous_state_data = None
+        for s in self._states:
+            if s.node_id == node_id and s.type == state_type:
+                previous_state_data = s.model_dump(mode="json", exclude_none=True)
+                break
+
         # Remove existing state of same type on same node
         self._states = [
             s for s in self._states
@@ -603,6 +669,15 @@ class Memory:
         )
         self._states.append(state)
         self._dirty = True
+
+        # Audit: state change
+        self._write_audit("state_change", {
+            "state_id": state_id,
+            "state_type": state_type.value,
+            "node_id": node_id,
+            "fields": fields.model_dump(mode="json", exclude_none=True) if fields else None,
+            "previous_state": previous_state_data,
+        })
 
     def _remove_states(
         self, node_id: str, state_type: Optional[StateType] = None
@@ -697,7 +772,16 @@ class Memory:
 
     def _graduate(self, node_id: str, meta: TemporalMeta) -> None:
         """Auto-promote node to next tier."""
+        old_tier = meta.tier
         meta.tier = self._next_tier(meta.tier)
+
+        # Audit: graduation
+        self._write_audit("graduation", {
+            "node_id": node_id,
+            "old_tier": old_tier,
+            "new_tier": meta.tier,
+            "frequency": meta.frequency,
+        })
 
     # -- Garden classification --
 
@@ -748,15 +832,28 @@ class Memory:
     def session_start(self, max_tokens: int = 4000) -> SessionStartResult:
         """Orient at session beginning. Resets touch dedup, returns memory summary."""
         self._session_touch_set = set()
+        # Generate session ID for audit correlation (timestamp + random bytes for uniqueness)
+        import os as _os
+        self._session_id = "ses_" + hashlib.sha256(
+            _now_iso().encode("utf-8") + _os.urandom(8)
+        ).hexdigest()[:12]
 
         garden_report = self.garden()
-
-        return SessionStartResult(
+        result = SessionStartResult(
             summary=f"Memory: {self.size} nodes",
             garden=garden_report,
             tier_counts=self._count_tiers(),
             total_nodes=self.size,
         )
+
+        # Audit: session start
+        self._write_audit("session_start", {
+            "total_nodes": self.size,
+            "tier_counts": self._count_tiers(),
+            "garden": garden_report.stats,
+        })
+
+        return result
 
     def session_end(self) -> SessionEndResult:
         """Cleanup at session end. Prunes dormant nodes, saves if path set."""
@@ -770,6 +867,16 @@ class Memory:
             saved = True
             save_path = self._file_path
 
+        # Audit: session end
+        self._write_audit("session_end", {
+            "nodes_pruned": pruned.count,
+            "pruned_ids": pruned.archived,
+            "garden": garden_report.stats,
+        })
+
+        # Clear session ID after audit
+        self._session_id = None
+
         return SessionEndResult(
             pruned=pruned,
             garden=garden_report,
@@ -781,6 +888,12 @@ class Memory:
         """Complete lifecycle — captures before/after snapshot around session_end."""
         nodes_before = self.size
         tiers_before = self._count_tiers()
+
+        # Audit: session wrap (before end, which will log session_end)
+        self._write_audit("session_wrap", {
+            "nodes_before": nodes_before,
+            "tiers_before": tiers_before,
+        })
 
         end_result = self.session_end()
 
@@ -819,20 +932,13 @@ class Memory:
         }
 
         # Write audit log BEFORE removal (write-first = crash-safe)
-        if self.audit_path:
-            entry = {
-                "timestamp": _now_iso(),
-                "event": "prune",
-                "nodes": [n.model_dump(mode="json", exclude_none=True) for n in pruned_nodes],
-                "relationships": [r.model_dump(mode="json", exclude_none=True) for r in pruned_rels],
-                "states": [s.model_dump(mode="json", exclude_none=True) for s in pruned_states],
-                "temporal": pruned_temporal,
-                "reason": f"pruned {len(dormant_ids)} dormant node(s)",
-            }
-            audit_path = Path(self.audit_path)
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(audit_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+        self._write_audit("prune", {
+            "nodes": [n.model_dump(mode="json", exclude_none=True) for n in pruned_nodes],
+            "relationships": [r.model_dump(mode="json", exclude_none=True) for r in pruned_rels],
+            "states": [s.model_dump(mode="json", exclude_none=True) for s in pruned_states],
+            "temporal": pruned_temporal,
+            "reason": f"pruned {len(dormant_ids)} dormant node(s)",
+        })
 
         # Remove from active graph
         for nid in dormant_ids:
@@ -863,6 +969,55 @@ class Memory:
             except json.JSONDecodeError:
                 continue  # Skip malformed lines
         return entries
+
+    @staticmethod
+    def query_audit(
+        audit_path: str,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        events: Optional[list[str]] = None,
+        node_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        adapter: Optional[str] = None,
+        limit: int = 100,
+        verify_chain: bool = False,
+    ) -> AuditQueryResult:
+        """Query audit trail with filters across active + rotated files.
+
+        Args:
+            audit_path: Path to active .audit.jsonl or .audit.manifest.json
+            after: Only entries after this ISO timestamp
+            before: Only entries before this ISO timestamp
+            events: Filter by event types (e.g., ["consolidation", "prune"])
+            node_id: Filter by node involvement (searches data recursively)
+            session_id: Filter by session ID
+            adapter: Filter by adapter framework name
+            limit: Maximum entries to return
+            verify_chain: Also verify hash chain integrity
+        """
+        return AuditWriter.query(
+            audit_path,
+            after=after,
+            before=before,
+            events=events,
+            node_id=node_id,
+            session_id=session_id,
+            adapter=adapter,
+            limit=limit,
+            verify_chain=verify_chain,
+        )
+
+    @staticmethod
+    def verify_audit(audit_path: str) -> AuditVerifyResult:
+        """Verify hash chain integrity of the audit trail.
+
+        Args:
+            audit_path: Path to active .audit.jsonl or .audit.manifest.json
+
+        Returns:
+            AuditVerifyResult with chain integrity status
+        """
+        return AuditWriter.verify(audit_path)
 
     # -- Lookup --
 
@@ -999,6 +1154,19 @@ class Memory:
         """Remove a node and its associated relationships, states, and temporal data."""
         if node_id not in self._nodes:
             return False
+
+        # Capture full state BEFORE removal for audit (write-first)
+        node = self._nodes[node_id]
+        removed_rels = [r for r in self._relationships if r.source == node_id or r.target == node_id]
+        removed_states = [s for s in self._states if s.node_id == node_id]
+        removed_temporal = self._temporal_map.get(node_id)
+        self._write_audit("node_remove", {
+            "node": node.model_dump(mode="json", exclude_none=True),
+            "relationships": [r.model_dump(mode="json", exclude_none=True) for r in removed_rels],
+            "states": [s.model_dump(mode="json", exclude_none=True) for s in removed_states],
+            "temporal": asdict(removed_temporal) if removed_temporal else None,
+        })
+
         del self._nodes[node_id]
         self._temporal_map.pop(node_id, None)
         self._relationships = [
@@ -1190,14 +1358,16 @@ class Memory:
         self._states = deduped_states
 
     def _write_audit(self, event: str, data: dict[str, Any]) -> None:
-        """Write an audit trail entry if audit_path is configured."""
-        if not self.audit_path:
+        """Write an audit trail entry via AuditWriter (hash-chained, rotatable)."""
+        writer = self._ensure_audit_writer()
+        if writer is None:
             return
-        entry = {"timestamp": _now_iso(), "event": event, **data}
-        audit_path = Path(self.audit_path)
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(audit_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        writer.write(
+            event=event,
+            data=data,
+            session_id=self._session_id,
+            adapter=self._adapter_context,
+        )
 
     def _merge_temporal(self, old_id: str, target_id: str) -> None:
         """Merge temporal metadata from old node into target — preserve the richer history.

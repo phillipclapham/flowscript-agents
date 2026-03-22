@@ -477,11 +477,11 @@ class TestUpdateNode:
             audit_path = path.replace(".json", ".audit.jsonl")
             assert Path(audit_path).exists()
             entries = [json.loads(line) for line in Path(audit_path).read_text().splitlines()]
-            assert len(entries) == 1
-            assert entries[0]["event"] == "update_node"
-            assert entries[0]["old_content"] == "before update"
-            assert entries[0]["new_content"] == "after update"
-            assert entries[0]["reason"] == "consolidation merge"
+            update_entries = [e for e in entries if e["event"] == "update_node"]
+            assert len(update_entries) == 1
+            assert update_entries[0]["data"]["old_content"] == "before update"
+            assert update_entries[0]["data"]["new_content"] == "after update"
+            assert update_entries[0]["data"]["reason"] == "consolidation merge"
 
     def test_update_with_multiple_relationships(self):
         """Node with relationships as both source AND target updates correctly."""
@@ -552,10 +552,10 @@ class TestUpdateNode:
             audit_path = path.replace(".json", ".audit.jsonl")
             assert Path(audit_path).exists()
             entries = [json.loads(line) for line in Path(audit_path).read_text().splitlines()]
-            assert len(entries) == 1
-            assert entries[0]["event"] == "update_node_merge"
-            assert entries[0]["merged_into"] == b.id
-            assert entries[0]["reason"] == "merge test"
+            merge_entries = [e for e in entries if e["event"] == "update_node_merge"]
+            assert len(merge_entries) == 1
+            assert merge_entries[0]["data"]["merged_into"] == b.id
+            assert merge_entries[0]["data"]["reason"] == "merge test"
 
     def test_update_collision_deduplicates_relationships(self):
         """When merging nodes that both relate to the same third node, no duplicate rels."""

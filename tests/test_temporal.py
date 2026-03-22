@@ -276,10 +276,11 @@ class TestPrune:
             audit_path = str(Path(td) / "mem.audit.jsonl")
             assert Path(audit_path).exists()
             entries = Memory.read_audit_log(audit_path)
-            assert len(entries) == 1
-            assert entries[0]["event"] == "prune"
-            assert len(entries[0]["nodes"]) == 1
-            assert entries[0]["nodes"][0]["content"] == "audited"
+            # Entries: node_create + prune
+            prune_entries = [e for e in entries if e["event"] == "prune"]
+            assert len(prune_entries) == 1
+            assert len(prune_entries[0]["data"]["nodes"]) == 1
+            assert prune_entries[0]["data"]["nodes"][0]["content"] == "audited"
 
     def test_prune_preserves_growing(self):
         mem = Memory()

@@ -89,7 +89,8 @@ class ConsolidationAction:
     target_node_id: str | None = None  # existing node affected (for UPDATE/RELATE/RESOLVE/NONE)
     detail: dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
-    is_fallback: bool = False  # True when ADD is due to error, not intentional LLM decision
+    is_fallback: bool = False  # True when ADD is due to error/collision, not intentional LLM decision
+    fallback_reason: str | None = None  # "collision", "collision_retry", "error", "parse_error", "llm_failure"
 
 
 @dataclass
@@ -103,22 +104,42 @@ class ConsolidationResult:
     nodes_resolved: int = 0
     nodes_skipped: int = 0  # NONE actions
     nodes_novel: int = 0  # no similar existing, bypassed LLM
-    fallback_count: int = 0  # ADD actions due to errors (not intentional ADD)
+    collision_count: int = 0  # ADDs from within-batch collisions (structural, not degradation)
+    error_count: int = 0  # ADDs from parse errors, LLM failures, bad args (real problems)
+    collisions_retried: int = 0  # collisions resolved by re-consolidation pass
     llm_called: bool = False
     llm_calls: int = 0  # number of LLM batch calls (>1 if contested nodes exceeded max_batch_size)
     total_contested: int = 0  # total nodes that needed LLM decision
     avg_candidates_per_node: float = 0.0  # average candidates found per contested node
 
     @property
-    def fallback_rate(self) -> float:
-        """Fraction of actions that were error fallbacks (not intentional ADD).
+    def fallback_count(self) -> int:
+        """Total fallbacks (collision + error). Backwards-compatible."""
+        return self.collision_count + self.error_count
 
-        Monitor this — sustained >10% indicates system degradation.
+    @property
+    def fallback_rate(self) -> float:
+        """Fraction of actions that were fallbacks (collision + error).
+
+        For monitoring, prefer error_rate — collisions are structural
+        (related content targeting same candidate), not degradation.
         """
         total = len(self.actions)
         if total == 0:
             return 0.0
         return self.fallback_count / total
+
+    @property
+    def error_rate(self) -> float:
+        """Fraction of actions that were error fallbacks (not collisions).
+
+        This is the metric that indicates real system degradation.
+        Sustained >10% means the LLM or parsing is failing.
+        """
+        total = len(self.actions)
+        if total == 0:
+            return 0.0
+        return self.error_count / total
 
     @property
     def novelty_rate(self) -> float:
@@ -133,8 +154,12 @@ class ConsolidationResult:
 
     @property
     def health_ok(self) -> bool:
-        """Quick health check: fallback rate below 10% threshold."""
-        return self.fallback_rate < 0.10
+        """Quick health check: error rate below 10% threshold.
+
+        Collisions are structural (related content) and handled by retry pass.
+        Only actual errors (parse failures, LLM failures) indicate degradation.
+        """
+        return self.error_rate < 0.10
 
 
 # =============================================================================
@@ -409,8 +434,8 @@ class ConsolidationEngine:
     Novel nodes (no similar existing) bypass LLM entirely.
 
     NOTE — Not thread-safe: consolidate() stores per-call state on the instance
-    (_batch_ids, _targeted_existing). Concurrent calls from multiple threads will
-    corrupt state. If your provider's tool_call() releases the GIL (e.g., HTTP calls),
+    (_batch_ids). Concurrent calls from multiple threads will corrupt state.
+    If your provider's tool_call() releases the GIL (e.g., HTTP calls),
     ensure external serialization.
 
     NOTE — Provider timeout: The engine has retry logic but no call timeout. If your
@@ -553,10 +578,6 @@ class ConsolidationEngine:
         batches = self._split_batches(contested)
         result.llm_calls = len(batches)
 
-        # Track existing node IDs targeted across batches to prevent
-        # cross-batch collision (two batches both UPDATEing same node = data loss).
-        self._targeted_existing: set[str] = set()
-
         for batch in batches:
             self._process_batch(batch, result, node_refs)
 
@@ -565,7 +586,10 @@ class ConsolidationEngine:
             if action.action == "ADD":
                 result.nodes_added += 1
                 if action.is_fallback:
-                    result.fallback_count += 1
+                    if action.fallback_reason in ("collision", "collision_retry"):
+                        result.collision_count += 1
+                    else:
+                        result.error_count += 1
             elif action.action == "UPDATE":
                 result.nodes_updated += 1
             elif action.action == "RELATE":
@@ -575,12 +599,20 @@ class ConsolidationEngine:
             elif action.action == "NONE":
                 result.nodes_skipped += 1
 
-        # Surface health warning if fallback rate exceeds threshold
+        # Surface health warnings with clear breakdown
+        if result.collision_count > 0 and result.collisions_retried > 0:
+            print(
+                f"ConsolidationEngine: {result.collision_count} collision(s) "
+                f"({result.collisions_retried} resolved by retry). "
+                f"Collisions indicate related content targeting same candidate.",
+                file=sys.stderr,
+            )
         if not result.health_ok:
             print(
-                f"ConsolidationEngine: WARNING — fallback rate {result.fallback_rate:.0%} "
-                f"exceeds 10% threshold ({result.fallback_count}/{len(result.actions)} actions). "
-                f"Memory quality may be degrading.",
+                f"ConsolidationEngine: WARNING — error rate {result.error_rate:.0%} "
+                f"exceeds 10% threshold ({result.error_count}/{len(result.actions)} actions). "
+                f"Memory quality may be degrading. "
+                f"Breakdown: {result.error_count} errors, {result.collision_count} collisions.",
                 file=sys.stderr,
             )
 
@@ -698,7 +730,16 @@ class ConsolidationEngine:
         result: ConsolidationResult,
         node_refs: list["NodeRef | None"],
     ) -> None:
-        """Process a single batch of contested nodes: LLM call → parse → execute."""
+        """Process a single batch of contested nodes: LLM call → parse → execute.
+
+        Within-batch collisions (two new nodes targeting same existing candidate)
+        are deferred and re-consolidated after the first pass settles. This works
+        because each non-collided action mutates the graph (UPDATE changes content,
+        RELATE adds relationships, RESOLVE changes state), so the collided node
+        may find a different — and correct — action on retry with fresh candidates.
+
+        Max 1 retry pass. If still colliding after retry, THEN fall back to ADD.
+        """
         try:
             tool_calls = self._call_consolidation_llm(batch)
         except Exception as e:
@@ -710,15 +751,17 @@ class ConsolidationEngine:
                     new_node_index=cn.new_index,
                     reasoning=f"Fallback ADD — LLM consolidation failed: {e}",
                     is_fallback=True,
+                    fallback_reason="llm_failure",
                 ))
             return
 
         # Parse tool calls into actions
         actions_by_index = self._parse_tool_calls(tool_calls, batch)
 
-        # Execute actions with within-batch + cross-batch collision tracking
-        batch_targets: set[str] = set()
+        # First pass: execute non-colliding actions, defer collisions
         within_batch_targets: set[str] = set()
+        collided_nodes: list[_ContestedNode] = []
+
         for cn in batch:
             action = actions_by_index.get(cn.new_index)
             if action is None:
@@ -727,27 +770,104 @@ class ConsolidationEngine:
                     new_node_index=cn.new_index,
                     reasoning="No consolidation decision received — fallback ADD",
                     is_fallback=True,
+                    fallback_reason="error",
                 )
 
-            # Within-batch collision: LLM targeted same candidate twice in one batch
+            # Within-batch collision: LLM targeted same candidate twice
             if (action.action not in ("ADD",) and action.target_node_id
                     and action.target_node_id in within_batch_targets):
-                action = ConsolidationAction(
-                    action="ADD",
-                    new_node_index=action.new_node_index,
-                    reasoning="Fallback ADD — candidate already targeted within this batch",
-                    is_fallback=True,
-                )
+                # Defer — don't ADD yet, try re-consolidation after first pass
+                collided_nodes.append(cn)
+                continue
 
             executed = self._execute_action(action, cn, node_refs)
             result.actions.append(executed)
-            # Track targets for both within-batch and cross-batch detection
             if executed.target_node_id and executed.action != "ADD":
                 within_batch_targets.add(executed.target_node_id)
-                batch_targets.add(executed.target_node_id)
 
-        # After batch completes, register all targets for cross-batch protection
-        self._targeted_existing.update(batch_targets)
+        # Retry pass: re-consolidate collided nodes with fresh candidates
+        if collided_nodes:
+            self._retry_collided_nodes(collided_nodes, result, node_refs)
+
+    def _retry_collided_nodes(
+        self,
+        collided: list[_ContestedNode],
+        result: ConsolidationResult,
+        node_refs: list["NodeRef | None"],
+    ) -> None:
+        """Re-consolidate nodes that collided within a batch.
+
+        After the first pass executed non-colliding actions, the graph has changed
+        (UPDATEs merged content, RELATEs created relationships, RESOLVEs changed
+        states). Re-search candidates for collided nodes against the updated graph
+        and let the LLM make a fresh decision with current state.
+
+        Max 1 retry. If the LLM call fails or a collision happens again on retry,
+        fall back to ADD (safe — no data loss, node was already created by extraction).
+        """
+        # Re-search candidates with fresh graph state
+        retried: list[_ContestedNode] = []
+        for cn in collided:
+            new_candidates = self._find_candidates(cn.content, exclude_ids=self._batch_ids)
+            if new_candidates:
+                # Create fresh contested node with updated candidates
+                retried.append(_ContestedNode(
+                    new_index=cn.new_index,
+                    node_type=cn.node_type,
+                    content=cn.content,
+                    candidates=new_candidates,
+                ))
+            else:
+                # No candidates after graph change — genuinely novel now
+                result.actions.append(ConsolidationAction(
+                    action="ADD",
+                    new_node_index=cn.new_index,
+                    reasoning="Collision retry: no candidates after graph update — novel",
+                ))
+                result.collisions_retried += 1
+
+        if not retried:
+            return
+
+        # Single LLM call for the retried nodes
+        try:
+            tool_calls = self._call_consolidation_llm(retried)
+            result.llm_calls += 1
+        except Exception as e:
+            print(f"ConsolidationEngine: retry LLM call failed: {e}", file=sys.stderr)
+            for cn in retried:
+                result.actions.append(ConsolidationAction(
+                    action="ADD",
+                    new_node_index=cn.new_index,
+                    reasoning=f"Fallback ADD — retry LLM failed: {e}",
+                    is_fallback=True,
+                    fallback_reason="llm_failure",
+                ))
+            return
+
+        retry_actions = self._parse_tool_calls(tool_calls, retried)
+
+        for cn in retried:
+            action = retry_actions.get(cn.new_index)
+            if action is None:
+                action = ConsolidationAction(
+                    action="ADD",
+                    new_node_index=cn.new_index,
+                    reasoning="No decision on retry — fallback ADD",
+                    is_fallback=True,
+                    fallback_reason="error",
+                )
+
+            # Execute the retry action. If it fails, _execute_action handles
+            # the fallback internally. No further retry — one pass is the limit.
+            executed = self._execute_action(action, cn, node_refs)
+            result.actions.append(executed)
+
+            if executed.is_fallback and executed.fallback_reason == "collision":
+                # Collision again on retry — this is the final ADD
+                executed.fallback_reason = "collision_retry"
+            elif not executed.is_fallback:
+                result.collisions_retried += 1
 
     # -------------------------------------------------------------------------
     # LLM interaction
@@ -914,6 +1034,7 @@ class ConsolidationEngine:
                     new_node_index=new_idx,
                     reasoning=f"Fallback ADD — invalid update_memory args (target={target_idx}, merged={bool(merged)})",
                     is_fallback=True,
+                    fallback_reason="parse_error",
                 )
             return ConsolidationAction(
                 action="UPDATE",
@@ -936,6 +1057,7 @@ class ConsolidationEngine:
                     new_node_index=new_idx,
                     reasoning=f"Fallback ADD — invalid relate_memories args (target={target_idx}, type={rel_type})",
                     is_fallback=True,
+                    fallback_reason="parse_error",
                 )
 
             # Tension requires axis
@@ -945,6 +1067,7 @@ class ConsolidationEngine:
                     new_node_index=new_idx,
                     reasoning="Fallback ADD — tension relationship missing required axis",
                     is_fallback=True,
+                    fallback_reason="parse_error",
                 )
 
             return ConsolidationAction(
@@ -971,6 +1094,7 @@ class ConsolidationEngine:
                     new_node_index=new_idx,
                     reasoning=f"Fallback ADD — invalid resolve_state args (target={target_idx}, type={resolve_type})",
                     is_fallback=True,
+                    fallback_reason="parse_error",
                 )
 
             return ConsolidationAction(
@@ -994,6 +1118,7 @@ class ConsolidationEngine:
                     new_node_index=new_idx,
                     reasoning=f"Fallback ADD — invalid skip_duplicate args (target={target_idx})",
                     is_fallback=True,
+                    fallback_reason="parse_error",
                 )
 
             return ConsolidationAction(
@@ -1010,6 +1135,7 @@ class ConsolidationEngine:
                 new_node_index=new_idx,
                 reasoning=f"Fallback ADD — unknown tool: {name}",
                 is_fallback=True,
+                fallback_reason="parse_error",
             )
 
     def _resolve_candidate_id(
@@ -1048,21 +1174,6 @@ class ConsolidationEngine:
                 self._write_consolidation_audit(action, cn)
                 return action
 
-            # Cross-batch collision guard: if this existing node was already
-            # targeted by a PREVIOUS batch, fall back to ADD to prevent silent
-            # data loss (e.g., two UPDATEs overwriting each other's merged content).
-            # Within-batch collisions are handled separately by the existing
-            # same-candidate logic (second action on same candidate raises, caught below).
-            if action.target_node_id and action.target_node_id in self._targeted_existing:
-                fallback = ConsolidationAction(
-                    action="ADD",
-                    new_node_index=action.new_node_index,
-                    reasoning="Fallback ADD — existing node already targeted by previous batch",
-                    is_fallback=True,
-                )
-                self._write_consolidation_audit(fallback, cn)
-                return fallback
-
             if action.action == "UPDATE":
                 self._execute_update(action, cn, node_refs)
 
@@ -1091,6 +1202,7 @@ class ConsolidationEngine:
                 new_node_index=action.new_node_index,
                 reasoning=f"Fallback ADD — execution of {action.action} failed: {e}",
                 is_fallback=True,
+                fallback_reason="error",
             )
             self._write_consolidation_audit(fallback, cn)
             return fallback

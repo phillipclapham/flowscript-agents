@@ -26,6 +26,7 @@ Usage:
     umem.memory.query.why(results[0].node_id)
 """
 
+from .audit import AuditConfig, AuditQueryResult, AuditVerifyResult
 from .memory import (
     Memory,
     MemoryOptions,
@@ -44,6 +45,9 @@ from .unified import UnifiedMemory
 
 __version__ = "0.2.0"
 __all__ = [
+    "AuditConfig",
+    "AuditQueryResult",
+    "AuditVerifyResult",
     "Memory",
     "MemoryOptions",
     "NodeRef",

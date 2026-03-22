@@ -879,10 +879,11 @@ class TestConsolidationAudit:
             # Find consolidation entries
             consolidation_entries = [
                 json.loads(line) for line in lines
-                if "consolidation" in json.loads(line).get("event", "")
+                if json.loads(line).get("event", "") == "consolidation"
             ]
             assert len(consolidation_entries) >= 1
-            assert consolidation_entries[0]["action"] == "NONE"
+            entry_data = consolidation_entries[0].get("data", consolidation_entries[0])
+            assert entry_data["action"] == "NONE"
             # Cleanup
             os.remove(audit_path)
 
@@ -1526,12 +1527,26 @@ class TestConsolidationMetrics:
 
     def test_fallback_rate_high(self):
         result = ConsolidationResult(actions=[
-            ConsolidationAction(action="ADD", new_node_index=0, reasoning="Fallback ADD — error"),
-            ConsolidationAction(action="ADD", new_node_index=1, reasoning="Fallback ADD — error"),
+            ConsolidationAction(action="ADD", new_node_index=0, reasoning="Fallback ADD — error", is_fallback=True, fallback_reason="error"),
+            ConsolidationAction(action="ADD", new_node_index=1, reasoning="Fallback ADD — error", is_fallback=True, fallback_reason="error"),
             ConsolidationAction(action="ADD", new_node_index=2, reasoning="novel"),
-        ], fallback_count=2)
+        ], error_count=2)
         assert result.fallback_rate == pytest.approx(2.0 / 3.0)
+        assert result.error_rate == pytest.approx(2.0 / 3.0)
         assert result.health_ok is False
+
+    def test_collision_vs_error_metrics(self):
+        """Collisions are structural, not degradation — health_ok ignores them."""
+        result = ConsolidationResult(actions=[
+            ConsolidationAction(action="ADD", new_node_index=0, is_fallback=True, fallback_reason="collision"),
+            ConsolidationAction(action="ADD", new_node_index=1, is_fallback=True, fallback_reason="collision"),
+            ConsolidationAction(action="UPDATE", new_node_index=2, target_node_id="x"),
+        ], collision_count=2)
+        assert result.fallback_count == 2  # total fallbacks (backwards compat)
+        assert result.collision_count == 2
+        assert result.error_count == 0
+        assert result.error_rate == 0.0
+        assert result.health_ok is True  # collisions don't trigger health alarm
 
     def test_fallback_rate_empty(self):
         result = ConsolidationResult(actions=[])
@@ -1628,11 +1643,20 @@ class TestConsolidationThinkTagStripping:
         assert len(add_actions) >= 1
 
 
-class TestCrossBatchCollision:
-    """Tests for cross-batch candidate collision protection."""
+class TestCrossBatchSequentialUpdates:
+    """Tests for cross-batch behavior without collision guard.
 
-    def test_same_target_across_batches_falls_back(self):
-        """Two batches targeting same existing node: second falls back to ADD."""
+    Cross-batch operations are sequential. When batch 1 UPDATEs a node (changing
+    its content-hash ID), batch 2's pre-searched candidate IDs become stale.
+    The execution error handler catches this gracefully — no data loss.
+
+    In real usage, cross-batch (max_batch_size exceeded) is rare. Most
+    consolidation happens within a single batch. The normal add()-to-add()
+    path does fresh candidate search each time, so stale IDs don't occur.
+    """
+
+    def test_same_target_across_batches_stale_id_handled(self):
+        """Two batches targeting same node: batch 2 gets stale ID error, handled gracefully."""
         mem, index, existing_ids = _make_memory_with_nodes()
         batch_num = [0]
 
@@ -1670,11 +1694,14 @@ class TestCrossBatchCollision:
 
         result = engine.consolidate(extracted, node_refs)
 
-        # First batch succeeds (UPDATE), second should fall back (cross-batch collision)
-        fallback_actions = [a for a in result.actions if a.is_fallback]
-        # At least one should have been caught by the cross-batch guard
-        # (depends on which existing node both batches target)
-        assert result.llm_calls == 2  # two batches processed
+        # Both batches process (no cross-batch guard blocking)
+        assert result.llm_calls == 2
+        # Batch 1 succeeds (UPDATE), batch 2 gets stale ID → error fallback ADD
+        # This is correct behavior: error is caught, no data lost, flagged in metrics
+        update_actions = [a for a in result.actions if a.action == "UPDATE"]
+        assert len(update_actions) >= 1  # at least batch 1 succeeded
+        # The error is properly categorized (not a collision)
+        assert result.collision_count == 0
 
 
 class TestIsFallbackField:
