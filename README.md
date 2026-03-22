@@ -23,15 +23,16 @@ with UnifiedMemory("agent-memory.json", embedder=OpenAIEmbeddings(), llm=llm) as
     mem.add("Redis cluster costs are killing us at $200/mo for 3 nodes")
     mem.add("Decided: switch to PostgreSQL — handles our scale at $15/mo")
 
-    print(mem.memory.query.tensions())
-    # → Tension: "sub-ms reads critical for UX" vs "cluster costs $200/mo"
-    #   axis: "performance vs cost"
+    tensions = mem.memory.query.tensions()
+    # → TensionsResult(1 tension, axes=['performance vs cost'])
+    # tensions.tensions_by_axis["performance vs cost"][0].source["content"]
+    # → "sub-ms reads critical for UX"
 
-    print(mem.memory.query.blocked())
-    # → what's stuck and why, with downstream impact
+    blocked = mem.memory.query.blocked()
+    # → BlockedResult(0 blockers)  — nothing stuck in this example
 
-    print(mem.memory.query.why(node_id))
-    # → full causal chain backward from any decision
+    why = mem.memory.query.why(node_id)
+    # → CausalAncestry: full chain backward from any decision
 ```
 
 Five queries that no vector store can answer — `why()`, `tensions()`, `blocked()`, `alternatives()`, `whatIf()` — over a typed semantic graph. Drop-in adapters for [9 agent frameworks](#works-with-your-stack). Hash-chained audit trail. And when memories contradict, we don't delete the old one — we create a queryable *tension*.
