@@ -1,301 +1,215 @@
 # flowscript-agents
 
-**Drop-in reasoning memory for AI agent frameworks.**
+**Your agent remembered the answer. It forgot the reasoning.**
 
-[![Tests](https://img.shields.io/badge/tests-409%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
-
----
-
-## The Problem
-
-Agent memory today is vector search over blobs. Your agent made a decision — why? What's blocking it? What tradeoffs did it weigh? Embeddings can't answer that.
-
-**flowscript-agents** replaces flat memory with queryable reasoning for LangGraph, CrewAI, Google ADK, and OpenAI Agents SDK. Same interfaces your framework expects, but now `memory.query.tensions()` actually works.
-
-Built on [flowscript-core](https://www.npmjs.com/package/flowscript-core) (TypeScript SDK) and [flowscript-ldp](https://pypi.org/project/flowscript-ldp/) (Python IR + query engine).
+[![Tests](https://img.shields.io/badge/tests-581%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
 ---
 
-## Install
+Plain text in. Typed reasoning queries out:
+
+```python
+from openai import OpenAI
+from flowscript_agents import UnifiedMemory
+from flowscript_agents.embeddings import OpenAIEmbeddings
+
+client = OpenAI()
+llm = lambda prompt: (client.chat.completions.create(
+    model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}]
+).choices[0].message.content or "")
+
+with UnifiedMemory("agent-memory.json", embedder=OpenAIEmbeddings(), llm=llm) as mem:
+    mem.add("We chose Redis for session storage — sub-ms reads are critical for UX")
+    mem.add("Redis cluster costs are killing us at $200/mo for 3 nodes")
+    mem.add("Decided: switch to PostgreSQL — handles our scale at $15/mo")
+
+    print(mem.memory.query.tensions())
+    # → Tension: "sub-ms reads critical for UX" vs "cluster costs $200/mo"
+    #   axis: "performance vs cost"
+
+    print(mem.memory.query.blocked())
+    # → what's stuck and why, with downstream impact
+
+    print(mem.memory.query.why(node_id))
+    # → full causal chain backward from any decision
+```
+
+Five queries that no vector store can answer — `why()`, `tensions()`, `blocked()`, `alternatives()`, `whatIf()` — over a typed semantic graph. Drop-in adapters for [9 agent frameworks](#works-with-your-stack). Hash-chained audit trail. And when memories contradict, we don't delete the old one — we create a queryable *tension*.
+
+<p align="center">
+  <img src="docs/flowscript-demo.png" alt="FlowScript — editor with .fs syntax, D3 reasoning graph, and tensions query results" width="800">
+</p>
+
+---
+
+## Get Started
+
+### MCP Server (Claude Code / Cursor — zero code)
+
+```json
+{
+  "mcpServers": {
+    "flowscript": {
+      "command": "flowscript-mcp",
+      "args": ["--memory", "./project-memory.json"],
+      "env": {
+        "OPENAI_API_KEY": "your-key"
+      }
+    }
+  }
+}
+```
 
 ```bash
-# Core (framework-agnostic Memory class)
 pip install flowscript-agents
-
-# With your framework
-pip install flowscript-agents[langgraph]
-pip install flowscript-agents[crewai]
-pip install flowscript-agents[google-adk]
-pip install flowscript-agents[openai-agents]
-
-# Everything
-pip install flowscript-agents[all]
 ```
+
+Auto-detects your API key and configures the full stack — vector search, typed extraction, and contradiction handling. Also supports `ANTHROPIC_API_KEY`. 11 tools, zero additional setup.
+
+### Python SDK
+
+```bash
+pip install flowscript-agents                       # Core
+pip install flowscript-agents[langgraph]            # + LangGraph adapter
+pip install flowscript-agents[crewai]               # + CrewAI adapter
+pip install flowscript-agents[all]                  # Everything (9 frameworks)
+```
+
+Bracket syntax matters — it installs framework-specific dependencies.
 
 ---
 
-## Quick Start (Framework-Agnostic)
+## How It Works
 
-The `Memory` class works standalone — no framework required.
+FlowScript operates at three levels. Pick where you start:
 
-```python
-from flowscript_agents import Memory
+**Level 1 — Reasoning graph, no API keys.** Use the `Memory` class directly to build typed nodes (thoughts, questions, decisions) with explicit relationships (causes, tensions, alternatives). Sub-ms queries, zero external deps. This is the power-user API. [Full docs →](docs/api-reference.md)
 
-mem = Memory()
+**Level 2 — Add vector search.** Pass an `embedder` to `UnifiedMemory` for semantic similarity search alongside reasoning queries. Three providers: OpenAI, SentenceTransformers, Ollama. [Details →](docs/api-reference.md#unifiedmemory)
 
-q = mem.question("Which database for agent sessions?")
-mem.alternative(q, "Redis").decide(rationale="speed critical")
-mem.alternative(q, "SQLite").block(reason="no concurrent writes")
-mem.tension(
-    mem.thought("Redis gives sub-ms reads"),
-    mem.thought("cluster costs $200/mo"),
-    axis="performance vs cost"
-)
-
-# Semantic queries — the thing no other memory gives you
-print(mem.query.tensions())       # tradeoffs with named axes
-print(mem.query.blocked())        # blockers + downstream impact
-print(mem.query.alternatives(q.id))  # options + their states
-
-# Persist
-mem.save("./agent-memory.json")
-
-# Next session
-mem2 = Memory.load_or_create("./agent-memory.json")
-```
+**Level 3 — Full stack.** Add an `llm` for auto-extraction (plain text → typed nodes) and a `consolidation_provider` for contradiction handling. Or just use the MCP server, which auto-configures all of this from a single API key.
 
 ---
 
-## LangGraph
+## Works With Your Stack
 
-Drop-in `BaseStore` implementation. Use as your LangGraph store — every item becomes a queryable FlowScript node.
+Drop-in adapters that implement your framework's native interface. Same API you already use — plus `query.tensions()`.
 
 ```python
 from flowscript_agents.langgraph import FlowScriptStore
 
-store = FlowScriptStore("./agent-memory.json")
+with FlowScriptStore("agent-memory.json") as store:
+    # Standard LangGraph BaseStore operations
+    store.put(("agents", "planner"), "db_decision", {"value": "chose Redis for speed"})
+    items = store.search(("agents", "planner"), query="Redis")
 
-# Standard LangGraph store operations
-store.put(("agents", "planner"), "db_decision", {"value": "chose Redis for speed"})
-items = store.search(("agents", "planner"), query="Redis")
+    # What's new — typed reasoning queries on the same data
+    tensions = store.memory.query.tensions()
+    blockers = store.memory.query.blocked()
 
-# FlowScript queries on the same data
-blockers = store.memory.query.blocked()
-tensions = store.memory.query.tensions()
-
-# Async support included
-items = await store.aget(("agents",), "key")
-await store.aput(("agents",), "key", {"value": "data"})
+    # Resolve a store key to its full reasoning context
+    node = store.resolve(("agents", "planner"), "db_decision")
 ```
 
-**Install:** `pip install flowscript-agents[langgraph]`
+| Framework | Adapter | Install |
+|:----------|:--------|:--------|
+| **LangGraph** | `FlowScriptStore` → `BaseStore` | `[langgraph]` |
+| **CrewAI** | `FlowScriptStorage` → `StorageBackend` | `[crewai]` |
+| **Google ADK** | `FlowScriptMemoryService` → `BaseMemoryService` | `[google-adk]` |
+| **OpenAI Agents** | `FlowScriptSession` → `Session` | `[openai-agents]` |
+| **Pydantic AI** | `FlowScriptDeps` → Deps + tools | `[pydantic-ai]` |
+| **smolagents** | `FlowScriptMemory` → Tool protocol | `[smolagents]` |
+| **LlamaIndex** | `FlowScriptMemoryBlock` → `BaseMemoryBlock` | `[llamaindex]` |
+| **Haystack** | `FlowScriptMemoryStore` → `MemoryStore` | `[haystack]` |
+| **CAMEL-AI** | `FlowScriptCamelMemory` → `AgentMemory` | `[camel-ai]` |
+
+All adapters expose `.memory` for query access, support `with` blocks, and accept optional `embedder`/`llm`/`consolidation_provider` for vector search and extraction. [Per-framework examples →](docs/adapters.md)
 
 ---
 
-## CrewAI
+## When Memories Contradict
 
-Duck-typed `StorageBackend` — plug into CrewAI's memory system.
+Every other memory system handles contradictions by deleting. Mem0's consolidation uses ADD/UPDATE/DELETE/NONE — when facts contradict, the old memory is replaced. LangGraph's langmem does the same. CrewAI's consolidation is flat keep/update/delete.
 
-```python
-from flowscript_agents.crewai import FlowScriptStorage
+FlowScript doesn't delete. It **relates**.
 
-storage = FlowScriptStorage("./crew-memory.json")
+When consolidation detects a contradiction, it creates a `RELATE` — a tension with a named axis. Both memories survive. The disagreement itself becomes queryable knowledge.
 
-# Standard CrewAI storage operations
-storage.save({"content": "User prefers concise answers", "score": 0.9})
-results = storage.search("user preferences", limit=5)
+| Action | What happens |
+|:-------|:-------------|
+| `ADD` | New knowledge, no existing match |
+| `UPDATE` | Enriches existing node with new detail |
+| `RELATE` | Contradiction detected — both sides preserved as a queryable tension |
+| `RESOLVE` | Blocker condition changed — downstream decisions unblocked |
+| `SKIP` | Exact duplicate, no action |
 
-# Scoped storage
-storage.save({"content": "API rate limit hit"}, metadata={"scope": "errors"})
-scoped = storage.search("rate limit", scope="errors")
-
-# FlowScript queries
-tensions = storage.memory.query.tensions()
-blockers = storage.memory.query.blocked()
-```
-
-**Install:** `pip install flowscript-agents[crewai]`
+You can't audit a deletion. You can query a tension.
 
 ---
 
-## Google ADK
+## Audit Trail
 
-`BaseMemoryService` implementation for ADK agents.
+Every mutation is SHA-256 hash-chained, append-only, crash-safe. Verify the full chain in one call:
 
 ```python
-from flowscript_agents.google_adk import FlowScriptMemoryService
+from flowscript_agents import Memory, MemoryOptions, AuditConfig
 
-memory_service = FlowScriptMemoryService("./adk-memory.json")
+mem = Memory.load_or_create("agent.json",
+    options=MemoryOptions(audit=AuditConfig(retention_months=84)))
 
-# Use with ADK Runner
-# runner = Runner(agent=agent, memory_service=memory_service, ...)
+# ... agent does work ...
 
-# Session events are automatically extracted as FlowScript nodes
-await memory_service.add_session_to_memory(session)
-
-# Search enriched with FlowScript query results
-results = await memory_service.search_memory("my-app", "user-1", "database decision")
-# Results include tensions, blockers when search matches reasoning patterns
-
-# Direct query access
-tensions = memory_service.memory.query.tensions()
+result = Memory.verify_audit("agent.audit.jsonl")
+# → AuditVerifyResult(valid=True, total_entries=42, files_verified=1)
 ```
 
-**Install:** `pip install flowscript-agents[google-adk]`
+Framework attribution is automatic — every audit entry records which adapter triggered it. Query by time range, event type, adapter, or session. Rotation with gzip compression. `on_event` callback for SIEM integration. [Full audit trail docs →](docs/audit-trail.md)
 
 ---
 
-## OpenAI Agents SDK
+## Memory That Evolves
 
-Session protocol implementation for the OpenAI Agents SDK.
+Nodes graduate through four temporal tiers based on actual use — `current` → `developing` → `proven` → `foundation`. Every query touches returned nodes, so knowledge that keeps getting queried earns its place. One-off observations fade naturally. Dormant nodes are pruned to the audit trail — archived with full provenance, never destroyed.
 
-```python
-from flowscript_agents.openai_agents import FlowScriptSession
-
-session = FlowScriptSession("conversation_123", "./openai-memory.json")
-
-# Standard session operations
-session.add_items([
-    {"role": "user", "content": "Which database should we use?"},
-    {"role": "assistant", "content": "I recommend Redis for the speed requirement."}
-])
-history = session.get_items(limit=10)
-
-# FlowScript queries on conversation reasoning
-tensions = session.memory.query.tensions()
-blockers = session.memory.query.blocked()
-```
-
-**Install:** `pip install flowscript-agents[openai-agents]`
+After 20 sessions, your memory is a curated knowledge base, not a pile of notes. [Session lifecycle details →](docs/lifecycle.md)
 
 ---
 
-## What You Get That Vector Memory Doesn't
+## Comparison
 
-| Capability | Vector stores | flowscript-agents |
-|:-----------|:-------------|:-----------------|
-| "Why did we decide X?" | Dig through logs | `memory.query.why(node_id)` |
-| "What's blocking progress?" | Hope you logged it | `memory.query.blocked()` |
-| "What tradeoffs exist?" | Good luck | `memory.query.tensions()` |
-| "What alternatives were considered?" | Not tracked | `memory.query.alternatives(q_id)` |
-| "What if we remove this?" | Rebuild from scratch | `memory.query.what_if(node_id)` |
-| Human-readable export | JSON blobs | `.fs` files your PM can read |
+| | FlowScript | Mem0 | Vector stores |
+|:---|:---|:---|:---|
+| Find similar content | Vector search | Vector search | Vector search |
+| "Why did we decide X?" | `why()` — typed causal chain | — | — |
+| "What's blocking?" | `blocked()` — downstream impact | — | — |
+| "What tradeoffs?" | `tensions()` — named axes | — | — |
+| "What if we change this?" | `whatIf()` — impact analysis | — | — |
+| Contradictions | `RELATE` — both sides preserved | `DELETE` — replaced | N/A |
+| Audit trail | SHA-256 hash chain | — | — |
+| Temporal graduation | Automatic 4-tier | — | — |
+| Token budgeting | 4 strategies | — | — |
 
-These aren't complementary to embeddings — they're orthogonal. Use both: vector search for "find similar," FlowScript for "understand reasoning."
-
----
-
-## API Reference
-
-### Memory (core)
-
-```python
-from flowscript_agents import Memory
-
-mem = Memory()                           # new empty
-mem = Memory.load("./memory.json")       # from file
-mem = Memory.load_or_create("./mem.json") # zero-friction entry
-
-# Build reasoning
-node = mem.thought("content")            # also: statement, question, action, insight, completion
-alt = mem.alternative(question, "option") # linked to question
-node.causes(other)                       # causal relationship
-node.tension_with(other, axis="speed vs cost")
-node.decide(rationale="reason")          # state: decided
-node.block(reason="why")                 # state: blocked
-node.unblock()                           # remove blocked state
-
-# Query
-mem.query.why(node_id)                   # causal chain
-mem.query.tensions()                     # all tensions with axes
-mem.query.blocked()                      # all blockers + impact
-mem.query.alternatives(question_id)      # options + states
-mem.query.what_if(node_id)               # downstream impact
-
-# Persist
-mem.save("./memory.json")               # atomic write
-mem.save()                               # re-save to loaded path
-```
-
-### Adapters
-
-| Framework | Class | Interface |
-|:----------|:------|:----------|
-| LangGraph | `FlowScriptStore` | `BaseStore` (get/put/search/delete + async) |
-| CrewAI | `FlowScriptStorage` | `StorageBackend` (save/search/update/delete + scopes) |
-| Google ADK | `FlowScriptMemoryService` | `BaseMemoryService` (add_session/search_memory) |
-| OpenAI Agents | `FlowScriptSession` | `Session` (get_items/add_items/pop_item/clear) |
-| Pydantic AI | `FlowScriptDeps` | Deps + `create_memory_tools()` |
-| smolagents | `FlowScriptMemory` | 5 Tool-protocol classes |
-| LlamaIndex | `FlowScriptMemoryBlock` | `BaseMemoryBlock[str]` (get/put/truncate) |
-| Haystack | `FlowScriptMemoryStore` | `MemoryStore` (add/search/delete) |
-| CAMEL-AI | `FlowScriptCamelMemory` | `AgentMemory` (retrieve/write/get_context/clear) |
-
-All adapters expose `.memory` for direct FlowScript query access and support context managers (`with` blocks).
-
----
-
-## Session Lifecycle
-
-Memory gets smarter every time you use it. Every query touches returned nodes — incrementing frequency and updating timestamps. Nodes that keep getting queried graduate through tiers:
-
-`current` → `developing` → `proven` → `foundation`
-
-After 5 sessions, your most-used decisions load first. After 20, your memory is a curated knowledge base, not a pile of notes. Dormant nodes get pruned to an audit trail — nothing is deleted, just archived.
-
-### The `with` Pattern (Recommended)
-
-All adapters and `UnifiedMemory` support context managers. Session lifecycle is automatic:
-
-```python
-from flowscript_agents.langgraph import FlowScriptStore
-
-with FlowScriptStore("./agent-memory.json") as store:
-    # session_start() called automatically on construction
-    store.put(("agents",), "decision", {"value": "chose Redis"})
-    results = store.search(("agents",), query="database")
-    # ... your agent does work ...
-# close() called automatically: prunes dormant nodes + saves to disk
-```
-
-This works the same way for all adapters:
-
-```python
-with FlowScriptStorage("./memory.json") as storage:     # CrewAI
-with FlowScriptMemoryService("./memory.json") as svc:    # Google ADK
-with FlowScriptSession("id", "./memory.json") as sess:   # OpenAI Agents
-with FlowScriptDeps("./memory.json") as deps:            # Pydantic AI
-with FlowScriptMemory("./memory.json") as mem:           # smolagents
-with FlowScriptMemoryStore("./memory.json") as store:    # Haystack
-with FlowScriptCamelMemory("./memory.json") as mem:      # CAMEL-AI
-```
-
-### Manual Lifecycle
-
-If you can't use `with` blocks (long-running services, notebooks):
-
-```python
-store = FlowScriptStore("./agent-memory.json")
-# session_start() called automatically on construction
-
-# ... work happens, auto-saves on each put/add ...
-
-# End of session: call close() explicitly
-store.close()  # prunes dormant nodes + saves
-```
-
-All adapters auto-save on `put`/`save`/`add_items` operations, so data is never lost between calls. `close()` adds the pruning step that keeps memory healthy over time.
+Under the hood: a local semantic graph with typed nodes, typed relationships, and typed states. Queries traverse structure — no embeddings required, no LLM calls, no network. Sub-ms on project-scale graphs. Vector search and reasoning queries are orthogonal — use both.
 
 ---
 
 ## Ecosystem
 
-- **[flowscript-core](https://www.npmjs.com/package/flowscript-core)** — TypeScript SDK with `Memory` class, `asTools()` (12 OpenAI-format tools), token budgeting, audit trail
-- **[flowscript-ldp](https://pypi.org/project/flowscript-ldp/)** — LDP Mode 3 reference implementation (historical artifact, v0.2.1 frozen)
-- **[flowscript.org](https://flowscript.org)** — Web editor, D3 visualization, live query panel
+| Package | What | Install |
+|:--------|:-----|:--------|
+| [flowscript-agents](https://pypi.org/project/flowscript-agents/) | Python SDK — 9 adapters, unified memory, consolidation, audit trail | `pip install flowscript-agents` |
+| [flowscript-core](https://www.npmjs.com/package/flowscript-core) | TypeScript SDK — Memory class, 15 tools, token budgeting, audit trail | `npm install flowscript-core` |
+| [flowscript.org](https://flowscript.org) | Web editor, D3 visualization, live query panel | Browser |
+
+**1,272 tests** across Python (581) and TypeScript (691). Same audit trail format and canonical JSON serialization across both languages.
+
+### Docs
+
+- [API Reference](docs/api-reference.md) — Memory, UnifiedMemory, AuditConfig, queries
+- [Framework Adapters](docs/adapters.md) — per-framework examples and integration guides
+- [Audit Trail](docs/audit-trail.md) — configuration, SIEM integration, compliance
+- [Session Lifecycle](docs/lifecycle.md) — temporal tiers, persistence, multi-session patterns
 
 ---
 
-## License
-
-MIT
+MIT. Built by [Phillip Clapham](https://phillipclapham.com).

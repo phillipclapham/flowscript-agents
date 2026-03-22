@@ -9,3 +9,4 @@ build/
 .flowscript-*
 *.jsonl
 
+.DS_Store
