@@ -19,20 +19,20 @@ llm = lambda prompt: (client.chat.completions.create(
 ).choices[0].message.content or "")
 
 with UnifiedMemory("agent-memory.json", embedder=OpenAIEmbeddings(), llm=llm) as mem:
-    mem.add("We chose Redis for session storage — sub-ms reads are critical for UX")
-    mem.add("Redis cluster costs are killing us at $200/mo for 3 nodes")
-    mem.add("Decided: switch to PostgreSQL — handles our scale at $15/mo")
+    mem.add("Redis gives sub-ms reads which is critical for our UX requirements")
+    mem.add("Redis clustering costs $200/month which exceeds our infrastructure budget of $50/month")
+    mem.add("PostgreSQL gives us rich queries at $15/month but read latency is 10-50ms")
 
     tensions = mem.memory.query.tensions()
-    # → TensionsResult(1 tension, axes=['performance vs cost'])
-    # tensions.tensions_by_axis["performance vs cost"][0].source["content"]
-    # → "sub-ms reads critical for UX"
+    # → TensionsResult(1 tension, axes=['cost vs budget'])
+    # The LLM detected the $200/month vs $50/month contradiction
+    # and preserved both sides as a queryable tension
 
     blocked = mem.memory.query.blocked()
-    # → BlockedResult(0 blockers)  — nothing stuck in this example
+    # → BlockedResult(0 blockers)
 
     why = mem.memory.query.why(node_id)
-    # → CausalAncestry: full chain backward from any decision
+    # → CausalAncestry: full chain backward from any node
 ```
 
 Five queries that no vector store can answer — `why()`, `tensions()`, `blocked()`, `alternatives()`, `whatIf()` — over a typed semantic graph. Drop-in adapters for [9 agent frameworks](#works-with-your-stack). Hash-chained audit trail. And when memories contradict, we don't delete the old one — we create a queryable *tension*.
