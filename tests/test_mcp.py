@@ -31,7 +31,7 @@ class TestToolDefinitions:
             assert "inputSchema" in tool
 
     def test_tool_count(self):
-        assert len(TOOLS) == 11
+        assert len(TOOLS) == 13
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
@@ -40,6 +40,7 @@ class TestToolDefinitions:
             "query_tensions", "query_blocked", "query_why",
             "query_what_if", "query_alternatives",
             "remove_memory", "session_wrap", "memory_stats",
+            "query_audit", "verify_audit",
         }
         assert names == expected
 
@@ -294,7 +295,7 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 11
+        assert len(tools) == 13
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names

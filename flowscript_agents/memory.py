@@ -376,6 +376,15 @@ class Memory:
             "operation": operation,
         }
 
+    def set_adapter_operation(self, operation: str) -> None:
+        """Update the operation field of existing adapter context.
+
+        Use this for per-operation attribution without resetting framework/class.
+        No-op if no adapter context is set.
+        """
+        if self._adapter_context is not None:
+            self._adapter_context["operation"] = operation
+
     def clear_adapter_context(self) -> None:
         """Clear adapter attribution."""
         self._adapter_context = None
@@ -1357,8 +1366,13 @@ class Memory:
                 deduped_states.append(state)
         self._states = deduped_states
 
-    def _write_audit(self, event: str, data: dict[str, Any]) -> None:
-        """Write an audit trail entry via AuditWriter (hash-chained, rotatable)."""
+    def write_audit(self, event: str, data: dict[str, Any]) -> None:
+        """Write an audit trail entry via AuditWriter (hash-chained, rotatable).
+
+        Public API for audit event emission. Used by Memory internals and
+        by cross-module callers (AutoExtract, ConsolidationEngine) that need
+        to record provenance events in the same hash chain.
+        """
         writer = self._ensure_audit_writer()
         if writer is None:
             return
@@ -1368,6 +1382,9 @@ class Memory:
             session_id=self._session_id,
             adapter=self._adapter_context,
         )
+
+    # Backwards compat alias — internal callers use this, will migrate over time
+    _write_audit = write_audit
 
     def _merge_temporal(self, old_id: str, target_id: str) -> None:
         """Merge temporal metadata from old node into target — preserve the richer history.

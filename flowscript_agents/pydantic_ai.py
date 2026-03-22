@@ -98,6 +98,7 @@ class FlowScriptDeps:
             else:
                 self._memory = Memory(options=self.options)
         self._memory.session_start()
+        self._memory.set_adapter_context("pydantic_ai", "FlowScriptDeps", "init")
 
     @property
     def memory(self) -> Memory:
@@ -141,6 +142,7 @@ class FlowScriptDeps:
         Returns:
             NodeRef for building relationships (causes, tension_with, etc.)
         """
+        self._memory.set_adapter_operation("store")
         if self._unified and self._unified.extractor:
             result = self._unified.add(content, metadata=metadata if metadata else None)
             # Return first extracted node for chaining
@@ -175,6 +177,7 @@ class FlowScriptDeps:
         Returns:
             List of dicts with 'content', 'id', 'tier', 'frequency' keys.
         """
+        self._memory.set_adapter_operation("recall")
         # Use unified search when available (vector + keyword + temporal)
         if self._unified:
             unified_results = self._unified.search(query, top_k=limit)
@@ -256,9 +259,12 @@ class FlowScriptDeps:
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

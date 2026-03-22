@@ -131,6 +131,7 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         self._max_tokens = max_tokens
         self._agent_id: str | None = None
         self._memory.session_start()
+        self._memory.set_adapter_context("camel_ai", "FlowScriptCamelMemory", "init")
 
     @property
     def memory(self) -> Memory:
@@ -173,6 +174,7 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         Returns:
             List of ContextRecord objects scored for context assembly.
         """
+        self._memory.set_adapter_operation("retrieve")
         records: list[ContextRecord] = []
 
         # Order by tier priority
@@ -273,6 +275,7 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         Args:
             records: List of MemoryRecord-like objects.
         """
+        self._memory.set_adapter_operation("write_records")
         # Extract content from all records
         contents = []
         for record in records:
@@ -399,6 +402,7 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
         Uses unified search (vector + keyword + temporal) when available,
         falls back to word-level matching.
         """
+        self._memory.set_adapter_operation("recall")
         if self._unified:
             unified_results = self._unified.search(query, top_k=limit)
             if unified_results:
@@ -452,9 +456,12 @@ class FlowScriptCamelMemory(_CamelAgentMemory):
 
     def close(self):
         """End session: prune dormant, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

@@ -124,6 +124,7 @@ class FlowScriptStore(BaseStore):
         self._rebuild_index()
         # Start temporal session (resets touch dedup)
         self._memory.session_start()
+        self._memory.set_adapter_context("langgraph", "FlowScriptStore", "init")
 
     @property
     def memory(self) -> Memory:
@@ -204,6 +205,7 @@ class FlowScriptStore(BaseStore):
         return self.batch(ops)
 
     def _handle_get(self, op: GetOp) -> Item | None:
+        self._memory.set_adapter_operation("get")
         stored = self._items.get((op.namespace, op.key))
         if stored is None:
             return None
@@ -218,6 +220,7 @@ class FlowScriptStore(BaseStore):
         )
 
     def _handle_put(self, op: PutOp) -> None:
+        self._memory.set_adapter_operation("put")
         ns = op.namespace
         key = op.key
 
@@ -381,9 +384,12 @@ class FlowScriptStore(BaseStore):
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

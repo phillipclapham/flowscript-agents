@@ -90,6 +90,7 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
         self._file_path = file_path
         # Start temporal session
         self._memory.session_start()
+        self._memory.set_adapter_context("google_adk", "FlowScriptMemoryService", "init")
 
     @property
     def memory(self) -> Memory:
@@ -128,6 +129,7 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
         to create typed reasoning nodes from session content. Otherwise,
         stores raw content as thought nodes.
         """
+        self._memory.set_adapter_operation("add_session")
         app_name = getattr(session, "app_name", "unknown")
         user_id = getattr(session, "user_id", "unknown")
         session_id = getattr(session, "id", "unknown")
@@ -206,6 +208,7 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
 
         Returns ADK SearchMemoryResponse with MemoryEntry objects.
         """
+        self._memory.set_adapter_operation("search_memory")
         # Use unified search when available (vector + keyword + temporal)
         if self._unified:
             unified_results = self._unified.search(query, top_k=10)
@@ -321,6 +324,7 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
         """Incremental event addition."""
+        self._memory.set_adapter_operation("add_events")
         prev_ref = None
         for event in events:
             content = _extract_event_content(event)
@@ -356,9 +360,12 @@ class FlowScriptMemoryService(_ADKBaseMemoryService):
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

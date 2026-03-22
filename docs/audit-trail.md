@@ -22,8 +22,10 @@ mem = Memory.load_or_create("agent-memory.json",
 
 ## Event Types
 
-### Python (13 events)
-`node_create`, `node_update`, `node_merge`, `node_remove`, `relationship_create`, `state_change`, `graduation`, `prune`, `session_start`, `session_end`, `session_wrap`, `consolidation`, `audit_cleanup`
+### Python (15 events)
+`node_create`, `update_node`, `update_node_merge`, `node_remove`, `relationship_create`, `state_change`, `graduation`, `prune`, `session_start`, `session_end`, `session_wrap`, `consolidation`, `transcript_extract`, `consolidation_batch`, `audit_cleanup`
+
+The `transcript_extract` event fires after each auto-extraction call with stats (nodes extracted/created/deduplicated, type breakdown, node IDs). The `consolidation_batch` event fires after consolidation with full metrics (contested/updated/related/resolved counts, collision stats, health status).
 
 ### TypeScript (14 events)
 `node_create`, `relationship_create`, `state_change`, `modifier_add`, `session_start`, `session_end`, `session_wrap`, `graduation`, `prune`, `snapshot`, `restore`, `transcript_extract`, `budget_apply`, `audit_cleanup`
@@ -69,6 +71,15 @@ result = Memory.query_audit("agent-memory.audit.jsonl",
     limit=100)
 # → AuditQueryResult(entries=[...], total_scanned=42, files_searched=1)
 ```
+
+## MCP Audit Tools
+
+The Python MCP server exposes `query_audit` and `verify_audit` as tools (13 tools total). When configured with an `AuditConfig`, your agent can query and verify the audit trail through natural conversation:
+
+- **`query_audit`** filters by time range, event types, node ID, session ID, adapter, and limit. Supports optional chain verification.
+- **`verify_audit`** checks the full hash chain integrity and returns entry counts.
+
+Both handle missing audit files gracefully (returns `valid: null` for verify, empty results for query).
 
 ## SIEM Integration
 

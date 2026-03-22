@@ -106,6 +106,7 @@ class FlowScriptSession:
         self._rebuild_items()
         # Start temporal session
         self._memory.session_start()
+        self._memory.set_adapter_context("openai_agents", "FlowScriptSession", "init")
 
     @property
     def memory(self) -> Memory:
@@ -148,6 +149,7 @@ class FlowScriptSession:
 
     async def get_items(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Get conversation items, optionally limited."""
+        self._memory.set_adapter_operation("get_items")
         items = self._items[-limit:] if limit is not None else self._items
         # Touch retrieved nodes — retrieval is engagement
         touched_ids = []
@@ -161,6 +163,7 @@ class FlowScriptSession:
 
     async def add_items(self, items: list[dict[str, Any]]) -> None:
         """Add conversation items to the session."""
+        self._memory.set_adapter_operation("add_items")
         base_order = len(self._items)
         for i, item in enumerate(items):
             content = _extract_item_content(item)
@@ -242,9 +245,12 @@ class FlowScriptSession:
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

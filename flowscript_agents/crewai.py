@@ -101,6 +101,7 @@ class FlowScriptStorage:
         self._rebuild_index()
         # Start temporal session
         self._memory.session_start()
+        self._memory.set_adapter_context("crewai", "FlowScriptStorage", "init")
 
     @property
     def memory(self) -> Memory:
@@ -157,6 +158,7 @@ class FlowScriptStorage:
 
     def save(self, records: list[Any]) -> None:
         """Save MemoryRecord objects."""
+        self._memory.set_adapter_operation("save")
         for record in records:
             rec_id = getattr(record, "id", str(uuid.uuid4()))
             content = getattr(record, "content", str(record))
@@ -222,6 +224,7 @@ class FlowScriptStorage:
         for scoring (compares query_embedding against indexed node vectors).
         Falls back to per-record embeddings or content matching otherwise.
         """
+        self._memory.set_adapter_operation("search")
         results: list[tuple[_RecordEntry, float]] = []
 
         # Build vector scores from VectorIndex when available
@@ -486,9 +489,12 @@ class FlowScriptStorage:
 
     def close(self):
         """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

@@ -91,6 +91,7 @@ class FlowScriptMemoryTools:
                 self._memory = Memory(options=options)
         self._file_path = file_path
         self._memory.session_start()
+        self._memory.set_adapter_context("smolagents", "FlowScriptMemoryTools", "init")
 
     @property
     def memory(self) -> Memory:
@@ -139,9 +140,12 @@ class FlowScriptMemoryTools:
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self
@@ -196,6 +200,7 @@ class _StoreMemoryTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, content: str, category: str = "observation") -> str:
+        self._memory.set_adapter_operation("store")
         # Use auto-extraction when available
         if self._unified and self._unified.extractor:
             result = self._unified.add(content, metadata={"category": category})
@@ -232,6 +237,7 @@ class _RecallMemoryTool(_BaseFSTool):
     output_type = "string"
 
     def forward(self, query: str, limit: int = 5) -> str:
+        self._memory.set_adapter_operation("recall")
         # Use unified search when available (vector + keyword + temporal)
         if self._unified:
             unified_results = self._unified.search(query, top_k=limit)

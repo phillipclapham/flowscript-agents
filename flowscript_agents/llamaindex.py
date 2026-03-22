@@ -148,6 +148,7 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
             else:
                 self._memory = Memory(options=options)
         self._memory.session_start()
+        self._memory.set_adapter_context("llamaindex", "FlowScriptMemoryBlock", "init")
 
     @property
     def memory(self) -> Memory:
@@ -337,6 +338,7 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
 
     def store(self, content: str, **metadata: Any) -> NodeRef:
         """Store a thought directly. Returns NodeRef for chaining."""
+        self._memory.set_adapter_operation("store")
         ref = self._memory.thought(content)
         if metadata:
             ref.node.ext = ref.node.ext or {}
@@ -348,6 +350,7 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
 
         Uses unified search (vector + keyword + temporal) when available.
         """
+        self._memory.set_adapter_operation("recall")
         if self._unified:
             unified_results = self._unified.search(query, top_k=limit)
             if unified_results:
@@ -401,9 +404,12 @@ class FlowScriptMemoryBlock(BaseMemoryBlock[str]):
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

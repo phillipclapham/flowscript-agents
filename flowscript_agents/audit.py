@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 
 # =============================================================================
@@ -50,6 +50,10 @@ class AuditConfig:
             for testing or when tamper-evidence is not needed.
         verbosity: "standard" (default) = mutation events only. "full" =
             mutations + read/query access events (for HIPAA access auditing).
+        encryption: "none" (default) or "aes-256-gcm". Encryption at rest for
+            audit trail files. NOT YET IMPLEMENTED — v2 commitment for SOC2/
+            enterprise compliance. Setting to anything other than "none" raises
+            NotImplementedError.
         on_event: Optional callback invoked for every audit entry. Receives the
             full entry dict AFTER disk write. Callback failure never blocks
             audit persistence. Use for SIEM integration, Observatory, or custom
@@ -61,7 +65,15 @@ class AuditConfig:
     retention_months: Optional[int] = 84
     hash_chain: bool = True
     verbosity: str = "standard"
+    encryption: Literal["none", "aes-256-gcm"] = "none"
     on_event: Optional[Callable[[dict[str, Any]], None]] = None
+
+    def __post_init__(self) -> None:
+        if self.encryption != "none":
+            raise NotImplementedError(
+                f"Encryption at rest ('{self.encryption}') is not yet implemented. "
+                "This is a documented v2 commitment. Currently only 'none' is supported."
+            )
 
 
 # =============================================================================
@@ -84,7 +96,7 @@ class AuditQueryResult:
 class AuditVerifyResult:
     """Result of verify_audit()."""
 
-    valid: bool
+    valid: Optional[bool]  # True = chain intact, False = chain broken, None = no audit trail found
     total_entries: int
     files_verified: int
     legacy_entries: int = 0
@@ -654,7 +666,7 @@ class AuditWriter:
             files_to_verify.append(active_path)
 
         if not files_to_verify:
-            return AuditVerifyResult(valid=True, total_entries=0, files_verified=0)
+            return AuditVerifyResult(valid=None, total_entries=0, files_verified=0)
 
         # Verify chain across all files
         total_entries = 0

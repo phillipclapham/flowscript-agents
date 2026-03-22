@@ -101,6 +101,7 @@ class FlowScriptMemoryStore:
         self._id_map: dict[str, str] = {}
         self._rebuild_index()
         self._memory.session_start()
+        self._memory.set_adapter_context("haystack", "FlowScriptMemoryStore", "init")
 
     @property
     def memory(self) -> Memory:
@@ -158,6 +159,7 @@ class FlowScriptMemoryStore:
             user_id: Optional user identifier for scoping.
             **kwargs: Additional args (agent_id, run_id, etc.)
         """
+        self._memory.set_adapter_operation("add_memories")
         haystack_meta = {"haystack_user_id": user_id}
         for k, v in kwargs.items():
             haystack_meta[f"haystack_{k}"] = v
@@ -245,6 +247,7 @@ class FlowScriptMemoryStore:
         Returns:
             List of ChatMessage-compatible dicts with memory content.
         """
+        self._memory.set_adapter_operation("search_memories")
         # Use unified search when available (vector + keyword + temporal)
         scored: list[tuple[NodeRef, float]] = []
         if query and self._unified:
@@ -392,9 +395,12 @@ class FlowScriptMemoryStore:
 
     def close(self):
         """End session: prune dormant nodes, save. Returns SessionWrapResult."""
-        if self._unified:
-            return self._unified.close()
-        return self._memory.session_wrap()
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
 
     def __enter__(self):
         return self

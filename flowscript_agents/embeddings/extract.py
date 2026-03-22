@@ -581,13 +581,21 @@ class AutoExtract:
         rels_created = self._create_extraction_relationships(extraction, node_refs)
         states_created = self._apply_extraction_states(extraction, node_refs)
 
-        return IngestResult(
+        result = IngestResult(
             nodes_created=created,
             nodes_deduplicated=deduped,
             relationships_created=rels_created,
             states_created=states_created,
             node_ids=[ref.id for ref in node_refs],
         )
+
+        # Audit: extraction provenance (never crash ingest for audit failures)
+        try:
+            self._write_extraction_audit(extraction, result)
+        except Exception:
+            print("AutoExtract: audit write failed (transcript_extract)", file=sys.stderr)
+
+        return result
 
     def _ingest_with_consolidation(
         self,
@@ -636,7 +644,7 @@ class AutoExtract:
                 if action.target_node_id not in surviving_ids:
                     surviving_ids.append(action.target_node_id)
 
-        return IngestResult(
+        result = IngestResult(
             nodes_created=consolidation_result.nodes_added,
             nodes_deduplicated=consolidation_result.nodes_skipped,
             relationships_created=rels_created + consolidation_result.nodes_related + consolidation_result.nodes_resolved,
@@ -650,6 +658,20 @@ class AutoExtract:
             consolidation_used=True,
             fallback_count=consolidation_result.fallback_count,
         )
+
+        # Audit: extraction provenance (never crash ingest for audit failures)
+        try:
+            self._write_extraction_audit(extraction, result)
+        except Exception:
+            print("AutoExtract: audit write failed (transcript_extract)", file=sys.stderr)
+
+        # Audit: consolidation batch summary
+        try:
+            self._write_consolidation_batch_audit(consolidation_result)
+        except Exception:
+            print("AutoExtract: audit write failed (consolidation_batch)", file=sys.stderr)
+
+        return result
 
     # -------------------------------------------------------------------------
     # Shared helpers
@@ -774,6 +796,50 @@ class AutoExtract:
             actor = "user" if user_count > agent_count else "agent"
 
         return self.ingest(transcript, metadata=metadata, actor=actor)
+
+    def _write_extraction_audit(
+        self,
+        extraction: ExtractionResult,
+        result: IngestResult,
+    ) -> None:
+        """Write a transcript_extract audit event summarizing what was extracted."""
+        # Build type breakdown from extraction
+        type_counts: dict[str, int] = {}
+        for node in extraction.nodes:
+            t = node.type if node.type in _VALID_NODE_TYPES else "thought"
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        self._memory.write_audit("transcript_extract", {
+            "nodes_extracted": len(extraction.nodes),
+            "nodes_created": result.nodes_created,
+            "nodes_deduplicated": result.nodes_deduplicated,
+            "relationships_extracted": len(extraction.relationships),
+            "relationships_created": result.relationships_created,
+            "states_created": result.states_created,
+            "type_breakdown": type_counts,
+            "node_ids": result.node_ids,
+            "consolidation_used": result.consolidation_used,
+        })
+
+    def _write_consolidation_batch_audit(
+        self,
+        consolidation_result: Any,
+    ) -> None:
+        """Write a consolidation_batch audit event summarizing batch results."""
+        self._memory.write_audit("consolidation_batch", {
+            "nodes_added": consolidation_result.nodes_added,
+            "nodes_updated": consolidation_result.nodes_updated,
+            "nodes_related": consolidation_result.nodes_related,
+            "nodes_resolved": consolidation_result.nodes_resolved,
+            "nodes_skipped": consolidation_result.nodes_skipped,
+            "nodes_novel": consolidation_result.nodes_novel,
+            "collision_count": consolidation_result.collision_count,
+            "collisions_retried": consolidation_result.collisions_retried,
+            "error_count": consolidation_result.error_count,
+            "total_contested": consolidation_result.total_contested,
+            "llm_calls": consolidation_result.llm_calls,
+            "health_ok": consolidation_result.health_ok,
+        })
 
     def _get_node_creator(self, type_str: str) -> Callable[[str], NodeRef]:
         """Get the Memory node creation method for a type string.

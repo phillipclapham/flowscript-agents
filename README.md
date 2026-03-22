@@ -65,7 +65,9 @@ Five queries that no vector store can answer — `why()`, `tensions()`, `blocked
 pip install flowscript-agents
 ```
 
-Auto-detects your API key and configures the full stack — vector search, typed extraction, and contradiction handling. Also supports `ANTHROPIC_API_KEY`. 11 tools, zero additional setup.
+Auto-detects your API key and configures the full stack: vector search, typed extraction, and contradiction handling. Also supports `ANTHROPIC_API_KEY`. 13 reasoning tools.
+
+**Then add the [CLAUDE.md snippet](examples/CLAUDE.md.example) to your project.** This is what turns tools into a workflow. It tells your agent *when* to record decisions, surface tensions before new choices, and check blockers at session start. Without it, the tools are available but passive. With it, your agent proactively tracks your project's reasoning.
 
 ### Python SDK
 
@@ -89,6 +91,31 @@ FlowScript operates at three levels. Pick where you start:
 **Level 2 — Add vector search.** Pass an `embedder` to `UnifiedMemory` for semantic similarity search alongside reasoning queries. Three providers: OpenAI, SentenceTransformers, Ollama. [Details →](docs/api-reference.md#unifiedmemory)
 
 **Level 3 — Full stack.** Add an `llm` for auto-extraction (plain text → typed nodes) and a `consolidation_provider` for contradiction handling. Or just use the MCP server, which auto-configures all of this from a single API key.
+
+---
+
+## First 5 Minutes
+
+With the MCP server running and the CLAUDE.md snippet in your project, try this conversation:
+
+> "I need to decide between PostgreSQL and MongoDB for our user data. We need ACID compliance for payments but flexibility for user profiles."
+
+Your agent stores the decision context, tradeoffs, and rationale automatically. Now introduce contradictory information:
+
+> "Actually, I've been looking at DynamoDB. The scale requirements might matter more than I thought."
+
+Now ask:
+
+> "What tensions do we have in our architecture decisions?"
+
+FlowScript preserved both perspectives (PostgreSQL's ACID compliance vs DynamoDB's scalability) as a queryable tension instead of deleting the first decision. That's what **RELATE > DELETE** means in practice.
+
+After a few sessions, try:
+- *"What's blocking our progress?"* surfaces blockers and their downstream impact
+- *"Why did we choose PostgreSQL originally?"* traces the full causal chain
+- *"What if we switch to DynamoDB?"* maps the downstream consequences
+
+After 20 sessions, you have a curated knowledge base of your project's decisions, not a pile of notes. Knowledge that stays relevant graduates through temporal tiers. One-off observations fade naturally.
 
 ---
 

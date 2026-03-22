@@ -32,15 +32,20 @@ When OPENAI_API_KEY is set, the server auto-configures:
 - LLM extraction (gpt-4o-mini) for typed reasoning extraction
 - Consolidation (gpt-4o-mini) for memory management (UPDATE/RELATE/RESOLVE)
 
-Tools exposed:
+Tools exposed (13):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
 - get_context: Get formatted memory for prompt injection
 - query_tensions: Find all tensions/tradeoffs in memory
 - query_blocked: Find all blocked items with impact analysis
 - query_why: Trace causal chain for a node
+- query_what_if: Trace downstream impact
 - query_alternatives: Reconstruct decision from options
+- remove_memory: Remove a node from memory
+- session_wrap: End-of-session lifecycle (graduation, pruning, save)
 - memory_stats: Get memory statistics
+- query_audit: Search the audit trail with filters
+- verify_audit: Verify hash chain integrity
 """
 
 from __future__ import annotations
@@ -266,6 +271,50 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "query_audit",
+        "description": (
+            "Search the audit trail for reasoning provenance. Call this to understand "
+            "how memory evolved — what was extracted, what consolidation decided, "
+            "which adapter made changes, or what happened in a specific session. "
+            "Returns hash-chained audit entries matching the filters."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "after": {"type": "string", "description": "Only entries after this ISO timestamp"},
+                "before": {"type": "string", "description": "Only entries before this ISO timestamp"},
+                "events": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Filter by event types. Available: node_create, relationship_create, "
+                        "state_change, graduation, prune, session_start, session_end, "
+                        "session_wrap, consolidation, consolidation_batch, transcript_extract, "
+                        "node_remove, update_node, update_node_merge, audit_cleanup"
+                    ),
+                },
+                "node_id": {"type": "string", "description": "Filter by node involvement"},
+                "session_id": {"type": "string", "description": "Filter by session ID"},
+                "adapter": {"type": "string", "description": "Filter by adapter framework name"},
+                "limit": {"type": "integer", "description": "Maximum entries (default 100)", "default": 100},
+                "verify_chain": {
+                    "type": "boolean",
+                    "description": "Also verify hash chain integrity of matched entries",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "verify_audit",
+        "description": (
+            "Verify hash chain integrity of the entire audit trail. Call this to "
+            "confirm the audit trail has not been tampered with. Returns chain "
+            "validity status, total entries verified, and location of any break."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -293,6 +342,8 @@ class MCPHandler:
             "remove_memory": self._remove_memory,
             "session_wrap": self._session_wrap,
             "memory_stats": self._memory_stats,
+            "query_audit": self._query_audit,
+            "verify_audit": self._verify_audit,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -465,6 +516,69 @@ class MCPHandler:
                 "provider": repr(self._umem.vector_index._provider),
             }
         return stats
+
+
+    def _get_audit_path(self) -> str | None:
+        """Derive audit trail path from memory file path."""
+        mem_path = self._umem.memory._file_path
+        if not mem_path:
+            return None
+        from pathlib import Path as _P
+        return str(_P(mem_path).parent / (_P(mem_path).stem + ".audit.jsonl"))
+
+    def _query_audit(self, args: dict) -> dict:
+        audit_path = self._get_audit_path()
+        if not audit_path:
+            return {"error": "No memory file path — audit trail requires file-based persistence"}
+        try:
+            result = Memory.query_audit(
+                audit_path,
+                after=args.get("after"),
+                before=args.get("before"),
+                events=args.get("events"),
+                node_id=args.get("node_id"),
+                session_id=args.get("session_id"),
+                adapter=args.get("adapter"),
+                limit=args.get("limit", 100),
+                verify_chain=args.get("verify_chain", False),
+            )
+            resp: dict[str, Any] = {
+                "entries": result.entries,
+                "total_scanned": result.total_scanned,
+                "files_searched": result.files_searched,
+                "count": len(result.entries),
+            }
+            if result.chain_valid is not None:
+                resp["chain_valid"] = result.chain_valid
+                if result.chain_break_at is not None:
+                    resp["chain_break_at"] = result.chain_break_at
+            return resp
+        except FileNotFoundError:
+            return {"entries": [], "total_scanned": 0, "files_searched": 0, "count": 0,
+                    "note": "No audit trail file found — audit may not be configured"}
+
+    def _verify_audit(self, args: dict) -> dict:
+        audit_path = self._get_audit_path()
+        if not audit_path:
+            return {"error": "No memory file path — audit trail requires file-based persistence"}
+        try:
+            result = Memory.verify_audit(audit_path)
+            resp: dict[str, Any] = {
+                "valid": result.valid,
+                "total_entries": result.total_entries,
+                "files_verified": result.files_verified,
+                "legacy_entries": result.legacy_entries,
+            }
+            if result.valid is False:
+                if result.chain_break_at is not None:
+                    resp["chain_break_at"] = result.chain_break_at
+                if result.chain_break_file is not None:
+                    resp["chain_break_file"] = result.chain_break_file
+            return resp
+        except FileNotFoundError:
+            return {"valid": None, "total_entries": 0, "files_verified": 0,
+                    "status": "no_audit_trail",
+                    "note": "No audit trail file found — auditing may not be configured"}
 
 
 def _serialize_query_result(result: Any, _seen: set | None = None) -> dict:
@@ -711,6 +825,7 @@ def run_server(
     # Start session tracking — enables touch deduplication and temporal
     # intelligence across the lifetime of this MCP server instance.
     umem.memory.session_start()
+    umem.memory.set_adapter_context("mcp", "FlowScriptMCP", "server")
     handler = MCPHandler(umem)
 
     try:
@@ -778,10 +893,12 @@ def run_server(
     finally:
         # Safety net: save state when stdin closes (Claude Code exits).
         # Use save() not close() — don't prune on unclean shutdown.
+        # Order: save first (may write audit entries), then clear context.
         try:
             umem.save()
         except Exception:
             pass
+        umem.memory.clear_adapter_context()
 
 
 # =============================================================================
