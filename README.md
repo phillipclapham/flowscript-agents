@@ -285,6 +285,18 @@ After 20 sessions, your memory is a curated knowledge base, not a pile of notes.
 
 ---
 
+## Description Integrity
+
+MCP tool descriptions are the prompts your LLM reads. If they're mutated in-process, the LLM silently follows poisoned instructions. The FlowScript MCP server includes three-layer integrity verification — a reference implementation of [deterministic description integrity for MCP](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402):
+
+1. **`verify_integrity` tool** — LLM-callable. SHA-256 hashes of all tool definitions, deep-frozen at startup (`MappingProxyType`). Detects in-process mutation by malicious dependencies, monkey-patching, or middleware.
+2. **`flowscript://integrity/manifest` resource** — Host-verifiable. Claude Code / Cursor can verify descriptions without LLM involvement.
+3. **`tool-integrity.json`** — Build-time root of trust. Generated via `flowscript-mcp --generate-manifest`, ships in the package.
+
+Both the Python and [TypeScript](https://www.npmjs.com/package/flowscript-core) MCP servers implement this architecture. Honest threat model: detects in-process mutation, not supply chain or transport-layer attacks. [Full discussion →](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402)
+
+---
+
 ## Comparison
 
 | | FlowScript | Mem0 | Vector stores |
