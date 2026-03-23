@@ -43,7 +43,7 @@ When OPENAI_API_KEY is set, the server auto-configures:
 - LLM extraction (gpt-4o-mini) for typed reasoning extraction
 - Consolidation (gpt-4o-mini) for memory management (UPDATE/RELATE/RESOLVE)
 
-Tools exposed (13):
+Tools exposed (14):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
 - get_context: Get formatted memory for prompt injection
@@ -57,14 +57,17 @@ Tools exposed (13):
 - memory_stats: Get memory statistics
 - query_audit: Search the audit trail with filters
 - verify_audit: Verify hash chain integrity
+- verify_integrity: Verify tool description integrity (SRI for LLM prompts)
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+from types import MappingProxyType
 from typing import Any, Optional
 
 from .memory import Memory
@@ -97,10 +100,101 @@ def _jsonrpc_error(id: Any, code: int, message: str) -> dict:
 
 
 # =============================================================================
+# Description Integrity — "SRI for LLM tool descriptions"
+# =============================================================================
+# Reference implementation: deterministic integrity verification for MCP servers.
+# See: github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402
+#
+# THREE-LAYER ARCHITECTURE:
+#   1. Tool: verify_integrity — LLM-callable, detects in-process mutation
+#   2. Resource: flowscript://integrity/manifest — Host-verifiable manifest
+#      (enables Claude Code/Cursor to verify descriptions WITHOUT LLM involvement,
+#       moving the security boundary to the correct layer)
+#   3. Build-time manifest: tool-integrity.json — root of trust independent of
+#      running process (generated via --generate-manifest)
+#
+# DETECTS:
+#   - In-process description mutation (malicious dependency, monkey-patching,
+#     or middleware that modifies tool dicts in the same Python process)
+#   - Accidental mutation (buggy wrapper that string-replaces descriptions)
+#
+# DOES NOT DETECT (requires ecosystem-level changes):
+#   - Supply chain attacks (poisoned before startup — manifest captures poisoned state)
+#   - Transport-layer attacks (MITM between server and client — hashes never leave process)
+#   - Client-side injection (host manipulates descriptions after receiving them)
+#
+# This is a reference implementation. Full integrity requires client-side verification
+# against an out-of-band manifest (build-time hashes, package signatures, etc.).
+
+
+def _canonicalize(obj: Any) -> str:
+    """Canonicalize a JSON-serializable value for deterministic hashing.
+
+    Sorted keys, no whitespace, deterministic primitive serialization.
+    Matches the TypeScript MCP server's canonicalize() for cross-language
+    consistency (though hash comparison is per-server, not cross-language).
+    """
+    if obj is None:
+        return "null"
+    if isinstance(obj, bool):
+        return "true" if obj else "false"
+    if isinstance(obj, (int, float)):
+        return json.dumps(obj)
+    if isinstance(obj, str):
+        return json.dumps(obj, ensure_ascii=True)
+    if isinstance(obj, (list, tuple)):
+        return "[" + ",".join(_canonicalize(v) for v in obj) + "]"
+    if isinstance(obj, (dict, MappingProxyType)):
+        entries = []
+        for k in sorted(obj.keys()):
+            v = obj[k]
+            if v is not None:  # skip None (like JSON.stringify skips undefined)
+                entries.append(json.dumps(k, ensure_ascii=True) + ":" + _canonicalize(v))
+        return "{" + ",".join(entries) + "}"
+    return json.dumps(str(obj), ensure_ascii=True)
+
+
+def _hash_tool_definition(tool: dict | MappingProxyType) -> str:
+    """Compute SHA-256 hash of a canonical JSON representation of a tool definition."""
+    canonical = _canonicalize(tool)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _thaw(obj: Any) -> Any:
+    """Recursively convert MappingProxyType back to plain dicts for JSON serialization."""
+    if isinstance(obj, MappingProxyType):
+        return {k: _thaw(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return [_thaw(x) for x in obj]
+    if isinstance(obj, list):
+        return [_thaw(x) for x in obj]
+    return obj
+
+
+def _deep_freeze(obj: dict) -> MappingProxyType:
+    """Recursively convert a dict tree to immutable MappingProxyType.
+
+    Any attempt to mutate a frozen dict raises TypeError.
+    Lists inside are converted to tuples (also immutable).
+    """
+    frozen = {}
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            frozen[k] = _deep_freeze(v)
+        elif isinstance(v, list):
+            frozen[k] = tuple(_deep_freeze(x) if isinstance(x, dict) else x for x in v)
+        else:
+            frozen[k] = v
+    return MappingProxyType(frozen)
+
+
+# =============================================================================
 # Tool definitions
 # =============================================================================
 
-TOOLS = [
+# Defined as plain dicts first, then frozen after definition.
+# The verify_integrity tool is NOT in this list (it verifies, it isn't verified).
+_TOOL_DEFS_RAW = [
     {
         "name": "search_memory",
         "description": (
@@ -328,6 +422,57 @@ TOOLS = [
     },
 ]
 
+# Deep-freeze all tool definitions — any in-process mutation raises TypeError.
+TOOLS: list[MappingProxyType] = [_deep_freeze(t) for t in _TOOL_DEFS_RAW]
+
+# Compute integrity manifest at startup — captures the "intended" state.
+_INTEGRITY_MANIFEST: dict[str, str] = {}
+_EXPECTED_TOOL_COUNT = len(TOOLS)
+for _t in TOOLS:
+    _INTEGRITY_MANIFEST[_t["name"]] = _hash_tool_definition(_t)
+_INTEGRITY_MANIFEST = MappingProxyType(_INTEGRITY_MANIFEST)  # type: ignore[assignment]
+
+# Load build-time manifest if available (generated via --generate-manifest).
+_BUILD_TIME_MANIFEST: dict[str, str] | None = None
+try:
+    _manifest_path = os.path.join(os.path.dirname(__file__), "tool-integrity.json")
+    with open(_manifest_path) as _f:
+        _BUILD_TIME_MANIFEST = json.load(_f)
+    _log(f"Integrity: loaded build-time manifest ({len(_BUILD_TIME_MANIFEST)} tools)")
+except (FileNotFoundError, json.JSONDecodeError):
+    pass  # No build-time manifest — startup-only verification
+
+# The verify_integrity tool — separate from the verified tools.
+_VERIFY_INTEGRITY_TOOL = _deep_freeze({
+    "name": "verify_integrity",
+    "description": (
+        "Verify that tool descriptions have not been mutated in-process since "
+        "server startup. Detects description modifications by malicious dependencies, "
+        "middleware, or monkey-patching. Returns per-tool SHA-256 hashes (expected vs "
+        "current) and a pass/fail verdict. NOTE: This verifies the server's own state "
+        "— transport-layer integrity requires host-level verification via the "
+        "flowscript://integrity/manifest resource. "
+        "Reference implementation: "
+        "github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402"
+    ),
+    "inputSchema": {"type": "object", "properties": {}},
+})
+
+# Full tool list exposed to clients: verified tools + the verifier
+ALL_TOOLS: list[MappingProxyType] = [*TOOLS, _VERIFY_INTEGRITY_TOOL]
+
+# Integrity resource definition
+_INTEGRITY_RESOURCE = {
+    "uri": "flowscript://integrity/manifest",
+    "name": "Tool Integrity Manifest",
+    "description": (
+        "SHA-256 hashes of all tool definitions for client-side integrity "
+        "verification. Compare these hashes against the tool definitions you "
+        "received to detect transport-layer description mutation."
+    ),
+    "mimeType": "application/json",
+}
+
 
 # =============================================================================
 # Tool handlers
@@ -355,6 +500,7 @@ class MCPHandler:
             "memory_stats": self._memory_stats,
             "query_audit": self._query_audit,
             "verify_audit": self._verify_audit,
+            "verify_integrity": self._verify_integrity,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -590,6 +736,71 @@ class MCPHandler:
             return {"valid": None, "total_entries": 0, "files_verified": 0,
                     "status": "no_audit_trail",
                     "note": "No audit trail file found — auditing may not be configured"}
+
+    def _verify_integrity(self, args: dict) -> dict:
+        """Verify in-process description integrity of all tool definitions."""
+        results = []
+        all_passed = True
+
+        # Check: has the tool count changed? (detect additions/removals)
+        count_match = len(TOOLS) == _EXPECTED_TOOL_COUNT
+        if not count_match:
+            all_passed = False
+
+        # Per-tool hash verification
+        for tool in TOOLS:
+            tool_name = tool["name"]
+            expected = _INTEGRITY_MANIFEST[tool_name]
+            current = _hash_tool_definition(tool)
+            passed = expected == current
+            if not passed:
+                all_passed = False
+
+            entry: dict[str, Any] = {
+                "tool": tool_name,
+                "expected_hash": expected,
+                "current_hash": current,
+                "status": "pass" if passed else "fail",
+            }
+
+            # Compare against build-time manifest if available
+            if _BUILD_TIME_MANIFEST:
+                build_hash = _BUILD_TIME_MANIFEST.get(tool_name)
+                if build_hash:
+                    build_match = build_hash == current
+                    if not build_match:
+                        all_passed = False
+                    entry["build_time_status"] = "pass" if build_match else "fail"
+                else:
+                    entry["build_time_status"] = "no_manifest"
+
+            results.append(entry)
+
+        verdict = "PASS" if all_passed else "FAIL"
+        return {
+            "success": True,
+            "verdict": verdict,
+            "tool_count": len(TOOLS),
+            "expected_tool_count": _EXPECTED_TOOL_COUNT,
+            "count_match": count_match,
+            "algorithm": "SHA-256",
+            "canonicalization": "deterministic sorted-keys JSON",
+            "build_time_manifest": "verified" if _BUILD_TIME_MANIFEST else "not available",
+            "tools": results,
+            "scope": (
+                "Verifies in-process description integrity (detects mutation by "
+                "dependencies, middleware, or monkey-patching). Transport-layer "
+                "integrity requires host-side verification via "
+                "flowscript://integrity/manifest resource."
+            ),
+            "description": (
+                "All tool descriptions match their startup hashes. "
+                "No in-process mutation detected."
+                if all_passed else
+                "WARNING: Tool description integrity violation detected. "
+                "One or more definitions have been modified since server startup."
+            ),
+        }
 
 
 def _serialize_query_result(result: Any, _seen: set | None = None) -> dict:
@@ -861,7 +1072,7 @@ def run_server(
                 client_version = params.get("protocolVersion", _PROTOCOL_VERSION)
                 resp = _jsonrpc_response(msg_id, {
                     "protocolVersion": client_version if client_version >= _PROTOCOL_VERSION else _PROTOCOL_VERSION,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "resources": {}},
                     "serverInfo": {
                         "name": _SERVER_NAME,
                         "version": _SERVER_VERSION,
@@ -870,9 +1081,36 @@ def run_server(
             elif method == "notifications/initialized":
                 continue  # notification, no response
             elif method == "tools/list":
-                resp = _jsonrpc_response(msg_id, {"tools": TOOLS})
+                resp = _jsonrpc_response(msg_id, {"tools": [json.loads(json.dumps(_thaw(t))) for t in ALL_TOOLS]})
             elif method == "resources/list":
-                resp = _jsonrpc_response(msg_id, {"resources": []})
+                resp = _jsonrpc_response(msg_id, {"resources": [_INTEGRITY_RESOURCE]})
+            elif method == "resources/read":
+                uri = params.get("uri", "")
+                if uri == "flowscript://integrity/manifest":
+                    import datetime
+                    manifest = {
+                        "version": _SERVER_VERSION,
+                        "algorithm": "SHA-256",
+                        "canonicalization": "deterministic sorted-keys JSON",
+                        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "tool_count": _EXPECTED_TOOL_COUNT,
+                        "tools": dict(_INTEGRITY_MANIFEST),
+                        "build_time_manifest": "available" if _BUILD_TIME_MANIFEST else "not generated",
+                        "usage": (
+                            "Hash each tool definition (sorted keys, no whitespace, SHA-256) "
+                            "and compare against the hashes in this manifest. Mismatches "
+                            "indicate description mutation between server and client."
+                        ),
+                    }
+                    resp = _jsonrpc_response(msg_id, {
+                        "contents": [{
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": json.dumps(manifest, indent=2),
+                        }],
+                    })
+                else:
+                    resp = _jsonrpc_error(msg_id, -32602, f"Unknown resource: {uri}")
             elif method == "prompts/list":
                 resp = _jsonrpc_response(msg_id, {"prompts": []})
             elif method == "tools/call":
@@ -927,8 +1165,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--memory", required=True,
-        help="Path to memory JSON file (created if doesn't exist)",
+        "--memory",
+        help="Path to memory JSON file (created if doesn't exist). Required unless --generate-manifest.",
     )
     parser.add_argument(
         "--embedder", choices=["openai", "sentence-transformers", "ollama"],
@@ -948,7 +1186,25 @@ def main() -> None:
         action="store_true",
         help="Disable auto-configuration from OPENAI_API_KEY",
     )
+    parser.add_argument(
+        "--generate-manifest",
+        action="store_true",
+        help="Generate tool-integrity.json and exit (build-time integrity manifest)",
+    )
     args = parser.parse_args()
+
+    # Generate build-time manifest and exit (no --memory needed)
+    if args.generate_manifest:
+        manifest = dict(_INTEGRITY_MANIFEST)
+        out_path = os.path.join(os.path.dirname(__file__), "tool-integrity.json")
+        with open(out_path, "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"Generated {out_path} ({len(manifest)} tools)")
+        sys.exit(0)
+
+    if not args.memory:
+        parser.error("--memory is required (unless using --generate-manifest)")
 
     embedder = None
     llm = None

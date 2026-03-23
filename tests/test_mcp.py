@@ -264,7 +264,8 @@ class TestMCPStdioProtocol:
         elif method == "notifications/initialized":
             return None  # notification, no response
         elif method == "tools/list":
-            return _jsonrpc_response(msg_id, {"tools": TOOLS})
+            from flowscript_agents.mcp import ALL_TOOLS, _thaw
+            return _jsonrpc_response(msg_id, {"tools": [_thaw(t) for t in ALL_TOOLS]})
         elif method == "tools/call":
             tool_name = params.get("name", "")
             tool_args = params.get("arguments", {})
@@ -273,7 +274,8 @@ class TestMCPStdioProtocol:
                 "content": [{"type": "text", "text": json.dumps(result)}],
             })
         elif method == "resources/list":
-            return _jsonrpc_response(msg_id, {"resources": []})
+            from flowscript_agents.mcp import _INTEGRITY_RESOURCE
+            return _jsonrpc_response(msg_id, {"resources": [_INTEGRITY_RESOURCE]})
         elif method == "prompts/list":
             return _jsonrpc_response(msg_id, {"prompts": []})
         elif method == "ping":
@@ -295,10 +297,11 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 13
+        assert len(tools) == 14  # 13 verified + verify_integrity
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names
+        assert "verify_integrity" in names
 
     def test_tools_call(self):
         resp = self._simulate_message({
@@ -321,7 +324,9 @@ class TestMCPStdioProtocol:
         resp = self._simulate_message({
             "jsonrpc": "2.0", "id": 4, "method": "resources/list",
         })
-        assert resp["result"]["resources"] == []
+        resources = resp["result"]["resources"]
+        assert len(resources) == 1
+        assert resources[0]["uri"] == "flowscript://integrity/manifest"
 
     def test_prompts_list(self):
         resp = self._simulate_message({
