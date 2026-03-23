@@ -258,8 +258,8 @@ class TestMCPStdioProtocol:
         if method == "initialize":
             return _jsonrpc_response(msg_id, {
                 "protocolVersion": "2025-03-26",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "flowscript-agents", "version": "0.2.0"},
+                "capabilities": {"tools": {}, "resources": {}},
+                "serverInfo": {"name": "flowscript-agents", "version": "0.2.5"},
             })
         elif method == "notifications/initialized":
             return None  # notification, no response
@@ -498,3 +498,94 @@ class TestVersionNegotiation:
         """Server should accept newer client versions (tools-only, compatible)."""
         from flowscript_agents.mcp import _PROTOCOL_VERSION
         assert _PROTOCOL_VERSION >= "2025-03-26"
+
+
+class TestDescriptionIntegrity:
+    """Tests for the three-layer MCP description integrity system."""
+
+    def test_tools_are_frozen(self):
+        """Tool definitions should be immutable MappingProxyType."""
+        from types import MappingProxyType
+        from flowscript_agents.mcp import TOOLS
+        for tool in TOOLS:
+            assert isinstance(tool, MappingProxyType), f"{tool['name']} is not frozen"
+
+    def test_mutation_blocked(self):
+        """Attempting to mutate a frozen tool should raise TypeError."""
+        from flowscript_agents.mcp import TOOLS
+        import pytest
+        with pytest.raises(TypeError):
+            TOOLS[0]["name"] = "hacked"
+
+    def test_verify_integrity_returns_pass(self):
+        """verify_integrity should return PASS on unmodified tools."""
+        handler, _ = _make_handler()
+        result = handler.handle_tool("verify_integrity", {})
+        assert result["verdict"] == "PASS"
+        assert result["count_match"] is True
+        assert result["tool_count"] == 13  # verified tools (not counting verify_integrity itself)
+
+    def test_verify_integrity_per_tool_status(self):
+        """Each tool should have pass status with matching hashes."""
+        handler, _ = _make_handler()
+        result = handler.handle_tool("verify_integrity", {})
+        for tool_result in result["tools"]:
+            assert tool_result["status"] == "pass", f"{tool_result['tool']} failed integrity check"
+            assert tool_result["expected_hash"] == tool_result["current_hash"]
+
+    def test_hash_determinism(self):
+        """Same tool should produce same hash across calls."""
+        from flowscript_agents.mcp import TOOLS, _hash_tool_definition
+        h1 = _hash_tool_definition(TOOLS[0])
+        h2 = _hash_tool_definition(TOOLS[0])
+        assert h1 == h2
+        assert len(h1) == 64  # SHA-256 hex length
+
+    def test_manifest_matches_runtime(self):
+        """Build-time manifest should match runtime hashes."""
+        from flowscript_agents.mcp import TOOLS, _INTEGRITY_MANIFEST, _hash_tool_definition
+        for tool in TOOLS:
+            name = tool["name"]
+            assert name in _INTEGRITY_MANIFEST
+            assert _INTEGRITY_MANIFEST[name] == _hash_tool_definition(tool)
+
+    def test_integrity_resource_exists(self):
+        """The integrity resource should be listed."""
+        from flowscript_agents.mcp import _INTEGRITY_RESOURCE
+        assert _INTEGRITY_RESOURCE["uri"] == "flowscript://integrity/manifest"
+        assert _INTEGRITY_RESOURCE["mimeType"] == "application/json"
+
+    def test_integrity_resource_frozen(self):
+        """The integrity resource metadata should be frozen."""
+        from types import MappingProxyType
+        from flowscript_agents.mcp import _INTEGRITY_RESOURCE
+        assert isinstance(_INTEGRITY_RESOURCE, MappingProxyType)
+
+    def test_canonicalize_none_as_null(self):
+        """None should canonicalize as 'null', not be skipped."""
+        from flowscript_agents.mcp import _canonicalize
+        result = _canonicalize({"a": None, "b": 1})
+        assert '"a":null' in result
+        assert '"b":1' in result
+
+    def test_canonicalize_bool_not_int(self):
+        """Booleans should serialize as true/false, not 1/0."""
+        from flowscript_agents.mcp import _canonicalize
+        assert _canonicalize(True) == "true"
+        assert _canonicalize(False) == "false"
+        assert _canonicalize(1) == "1"
+
+    def test_canonicalize_sorted_keys(self):
+        """Keys should be sorted alphabetically."""
+        from flowscript_agents.mcp import _canonicalize
+        result = _canonicalize({"z": 1, "a": 2, "m": 3})
+        assert result == '{"a":2,"m":3,"z":1}'
+
+    def test_all_schemas_have_additional_properties(self):
+        """All tool inputSchemas should have additionalProperties: false."""
+        from flowscript_agents.mcp import TOOLS
+        for tool in TOOLS:
+            schema = tool["inputSchema"]
+            assert schema.get("additionalProperties") is False, (
+                f"{tool['name']} missing additionalProperties: false"
+            )

@@ -63,6 +63,7 @@ Tools exposed (14):
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -88,7 +89,7 @@ def _log(msg: str) -> None:
 
 _PROTOCOL_VERSION = "2025-03-26"
 _SERVER_NAME = "flowscript-agents"
-_SERVER_VERSION = "0.2.0"
+_SERVER_VERSION = "0.2.5"
 
 
 def _jsonrpc_response(id: Any, result: Any) -> dict:
@@ -122,6 +123,14 @@ def _jsonrpc_error(id: Any, code: int, message: str) -> dict:
 #   - Supply chain attacks (poisoned before startup — manifest captures poisoned state)
 #   - Transport-layer attacks (MITM between server and client — hashes never leave process)
 #   - Client-side injection (host manipulates descriptions after receiving them)
+#   - Reflection-based bypass: gc.get_referents() can reach the underlying dict
+#     behind MappingProxyType. ctypes can write to arbitrary memory. Deep-freeze
+#     is best-effort against casual/accidental mutation. For determined in-process
+#     attackers, the build-time manifest is the correct verification layer.
+#   - Filesystem manifest replacement: if an attacker can write to the package
+#     directory, they can replace tool-integrity.json to match poisoned definitions.
+#     In high-security deployments, sign the manifest or distribute via separate
+#     trust channel.
 #
 # This is a reference implementation. Full integrity requires client-side verification
 # against an out-of-band manifest (build-time hashes, package signatures, etc.).
@@ -148,8 +157,9 @@ def _canonicalize(obj: Any) -> str:
         entries = []
         for k in sorted(obj.keys()):
             v = obj[k]
-            if v is not None:  # skip None (like JSON.stringify skips undefined)
-                entries.append(json.dumps(k, ensure_ascii=True) + ":" + _canonicalize(v))
+            # Include None as "null" (matches TS which keeps null but skips undefined).
+            # Python dicts don't have "undefined" — all present keys are serialized.
+            entries.append(json.dumps(k, ensure_ascii=True) + ":" + _canonicalize(v))
         return "{" + ",".join(entries) + "}"
     return json.dumps(str(obj), ensure_ascii=True)
 
@@ -218,6 +228,7 @@ _TOOL_DEFS_RAW = [
                 },
             },
             "required": ["query"],
+            "additionalProperties": False,
         },
     },
     {
@@ -243,6 +254,7 @@ _TOOL_DEFS_RAW = [
                 },
             },
             "required": ["text"],
+            "additionalProperties": False,
         },
     },
     {
@@ -262,6 +274,7 @@ _TOOL_DEFS_RAW = [
                     "default": 4000,
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -282,6 +295,7 @@ _TOOL_DEFS_RAW = [
                     "default": "axis",
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -292,7 +306,7 @@ _TOOL_DEFS_RAW = [
             "external dependencies. Returns blockers sorted by impact score "
             "(downstream effects), with reason, duration, and transitive causes."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "query_why",
@@ -309,6 +323,7 @@ _TOOL_DEFS_RAW = [
                 "node_id": {"type": "string", "description": "Node ID to trace"},
                 "content": {"type": "string", "description": "Search for node by content (alternative to node_id)"},
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -325,6 +340,7 @@ _TOOL_DEFS_RAW = [
                 "question_id": {"type": "string", "description": "Question node ID"},
                 "content": {"type": "string", "description": "Search for question by content (alternative to question_id)"},
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -341,6 +357,7 @@ _TOOL_DEFS_RAW = [
                 "node_id": {"type": "string", "description": "Node ID to analyze"},
                 "content": {"type": "string", "description": "Search for node by content (alternative to node_id)"},
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -357,6 +374,7 @@ _TOOL_DEFS_RAW = [
                 "node_id": {"type": "string", "description": "ID of the node to remove"},
             },
             "required": ["node_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -366,7 +384,7 @@ _TOOL_DEFS_RAW = [
             "save to disk. Call this at the end of a work session to keep memory "
             "healthy. Dormant nodes (not accessed recently) are archived, not deleted."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "memory_stats",
@@ -374,7 +392,7 @@ _TOOL_DEFS_RAW = [
             "Get memory statistics: node count, tier distribution, garden health, "
             "embedding status. Call this to understand the current state of memory."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "query_audit",
@@ -409,6 +427,7 @@ _TOOL_DEFS_RAW = [
                     "default": False,
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -418,7 +437,7 @@ _TOOL_DEFS_RAW = [
             "confirm the audit trail has not been tampered with. Returns chain "
             "validity status, total entries verified, and location of any break."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
 ]
 
@@ -455,14 +474,14 @@ _VERIFY_INTEGRITY_TOOL = _deep_freeze({
         "Reference implementation: "
         "github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402"
     ),
-    "inputSchema": {"type": "object", "properties": {}},
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
 })
 
 # Full tool list exposed to clients: verified tools + the verifier
 ALL_TOOLS: list[MappingProxyType] = [*TOOLS, _VERIFY_INTEGRITY_TOOL]
 
-# Integrity resource definition
-_INTEGRITY_RESOURCE = {
+# Integrity resource definition (frozen for consistency)
+_INTEGRITY_RESOURCE = _deep_freeze({
     "uri": "flowscript://integrity/manifest",
     "name": "Tool Integrity Manifest",
     "description": (
@@ -471,7 +490,7 @@ _INTEGRITY_RESOURCE = {
         "received to detect transport-layer description mutation."
     ),
     "mimeType": "application/json",
-}
+})
 
 
 # =============================================================================
@@ -1083,11 +1102,10 @@ def run_server(
             elif method == "tools/list":
                 resp = _jsonrpc_response(msg_id, {"tools": [json.loads(json.dumps(_thaw(t))) for t in ALL_TOOLS]})
             elif method == "resources/list":
-                resp = _jsonrpc_response(msg_id, {"resources": [_INTEGRITY_RESOURCE]})
+                resp = _jsonrpc_response(msg_id, {"resources": [_thaw(_INTEGRITY_RESOURCE)]})
             elif method == "resources/read":
                 uri = params.get("uri", "")
                 if uri == "flowscript://integrity/manifest":
-                    import datetime
                     manifest = {
                         "version": _SERVER_VERSION,
                         "algorithm": "SHA-256",
