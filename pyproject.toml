@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flowscript-agents"
-version = "0.2.1"
+version = "0.2.2"
 description = "Complete agent memory: reasoning queries + vector search + auto-extraction. Decision intelligence for LangGraph, CrewAI, Google ADK, OpenAI Agents SDK, Pydantic AI, smolagents, LlamaIndex, Haystack, CAMEL-AI, and Vercel AI SDK."
 readme = "README.md"
 license = "MIT"
