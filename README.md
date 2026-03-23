@@ -1,6 +1,10 @@
-# flowscript-agents
+<p align="center">
+  <img src="docs/brand/logo-512.png" alt="FlowScript" width="120" />
+</p>
 
-**Agent memory that tracks why you decided, what conflicts, and what's blocked. Not just what was said.**
+<h1 align="center">flowscript-agents</h1>
+
+<p align="center"><strong>Agent memory that tracks why you decided, what conflicts, and what's blocked. Not just what was said.</strong></p>
 
 [![Tests](https://img.shields.io/badge/tests-581%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
