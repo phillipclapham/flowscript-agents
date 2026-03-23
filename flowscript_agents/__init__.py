@@ -3,7 +3,7 @@ FlowScript Agents — Complete agent memory: reasoning + vector + auto-extractio
 
 Decision intelligence memory for AI agent frameworks. Drop-in provider for
 LangGraph, CrewAI, Google ADK, OpenAI Agents SDK, Pydantic AI, smolagents,
-LlamaIndex, Haystack, CAMEL-AI, and Vercel AI SDK.
+LlamaIndex, Haystack, and CAMEL-AI.
 
 What Mem0 does, plus what Mem0 can't: typed semantic queries (why, tensions,
 blocked, alternatives, whatIf) over agent reasoning with temporal intelligence.
