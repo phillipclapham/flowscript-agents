@@ -127,6 +127,14 @@ The default is OpenAI `text-embedding-3-small`. To use a different provider, pas
 
 You still need an LLM API key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) for typed extraction and consolidation, even when using local embeddings.
 
+**Using Anthropic instead of OpenAI:**
+
+With `ANTHROPIC_API_KEY` set, the server auto-configures extraction and consolidation using Claude Haiku. No vector search (Anthropic has no embedding API), but keyword + temporal search works well. To use a different Anthropic model:
+
+```json
+"args": ["--memory", "./project-memory.json", "--llm-model", "claude-sonnet-4-6"]
+```
+
 **Then add the [CLAUDE.md snippet](examples/CLAUDE.md.example) to your project.** This is what turns tools into a workflow. It tells your agent *when* to record decisions, surface tensions before new choices, and check blockers at session start. Without it, the tools are available but passive. With it, your agent proactively tracks your project's reasoning.
 
 ### Python SDK
