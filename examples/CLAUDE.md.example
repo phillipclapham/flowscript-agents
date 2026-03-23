@@ -2,7 +2,8 @@
 #
 # Paste the section below into your project's CLAUDE.md to enable
 # proactive reasoning memory. FlowScript MCP tools are available
-# when the server is configured via .mcp.json or ~/.claude.json.
+# when the server is configured in your editor's MCP settings
+# (.claude/settings.json for Claude Code, .mcp.json for Cursor/Windsurf).
 
 ## Reasoning Memory (FlowScript)
 

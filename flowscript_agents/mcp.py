@@ -13,19 +13,30 @@ Full config:
     python -m flowscript_agents.mcp --memory ./agent.json \\
         --embedder openai --llm-model gpt-4o-mini
 
-Configure in your project's .mcp.json (project-level, shareable):
+Configure in your editor's MCP settings:
+
+Claude Code — .claude/settings.json (project or ~/.claude/settings.json global):
 {
   "mcpServers": {
     "flowscript": {
-      "type": "stdio",
-      "command": "python3",
-      "args": ["-m", "flowscript_agents.mcp", "--memory", "./agent-memory.json"],
+      "command": "flowscript-mcp",
+      "args": ["--memory", "./agent-memory.json"],
       "env": { "OPENAI_API_KEY": "sk-..." }
     }
   }
 }
 
-Or in ~/.claude.json for global (all projects) configuration.
+Cursor / Windsurf / VS Code — .mcp.json in project root:
+{
+  "mcpServers": {
+    "flowscript": {
+      "type": "stdio",
+      "command": "flowscript-mcp",
+      "args": ["--memory", "./agent-memory.json"],
+      "env": { "OPENAI_API_KEY": "sk-..." }
+    }
+  }
+}
 
 When OPENAI_API_KEY is set, the server auto-configures:
 - OpenAI embeddings (text-embedding-3-small) for vector search

@@ -47,6 +47,16 @@ Five queries that no vector store can answer — `why()`, `tensions()`, `blocked
 
 ### MCP Server (Claude Code / Cursor — zero code)
 
+```bash
+pip install flowscript-agents openai
+```
+
+The `openai` package is required for extraction, consolidation, and vector search. Without it, `add_memory` stores raw text and `query_tensions` won't find anything.
+
+Add to your editor's MCP config:
+
+**Claude Code** — add to `.claude/settings.json` in your project (or `~/.claude/settings.json` for global):
+
 ```json
 {
   "mcpServers": {
@@ -61,11 +71,61 @@ Five queries that no vector store can answer — `why()`, `tensions()`, `blocked
 }
 ```
 
-```bash
-pip install flowscript-agents
+**Cursor / Windsurf / VS Code** — add to `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "flowscript": {
+      "type": "stdio",
+      "command": "flowscript-mcp",
+      "args": ["--memory", "./project-memory.json"],
+      "env": {
+        "OPENAI_API_KEY": "your-key"
+      }
+    }
+  }
+}
 ```
 
-Auto-detects your API key and configures the full stack: vector search, typed extraction, and contradiction handling. Also supports `ANTHROPIC_API_KEY`. 13 reasoning tools.
+**Fallback:** If `env` passthrough doesn't work in your editor, export the key in your shell before launching:
+```bash
+export OPENAI_API_KEY=your-key
+```
+
+The server auto-detects your API key and configures the full stack:
+
+| Key | What you get |
+|:----|:-------------|
+| `OPENAI_API_KEY` | Vector search (text-embedding-3-small) + typed extraction (gpt-4o-mini) + consolidation |
+| `ANTHROPIC_API_KEY` | Typed extraction + consolidation (no embeddings, keyword search fallback) |
+| Neither | Raw text storage only. Tools work, but no typed extraction and `query_tensions` won't find anything. |
+
+**Without an API key, you get a degraded experience.** The server warns on startup and in tool responses.
+
+### Embedding Providers
+
+The default is OpenAI `text-embedding-3-small`. To use a different provider, pass flags in `args`:
+
+```json
+"args": ["--memory", "./project-memory.json", "--embedder", "ollama", "--embedding-model", "nomic-embed-text"]
+```
+
+| Flag | What it does | Default |
+|:-----|:-------------|:--------|
+| `--embedder` | Embedding provider: `openai`, `sentence-transformers`, or `ollama` | Auto-detected from API key |
+| `--embedding-model` | Model name (provider-specific) | `text-embedding-3-small` (OpenAI) |
+| `--llm-model` | LLM for extraction and consolidation | `gpt-4o-mini` |
+| `--no-auto` | Disable auto-configuration from API keys | Off |
+
+**Local embeddings (free, no API key for embeddings):**
+
+| Provider | Install | Example model | Notes |
+|:---------|:--------|:--------------|:------|
+| Ollama | [Install Ollama](https://ollama.com), then `ollama pull nomic-embed-text` | `nomic-embed-text` | Beats text-embedding-3-small. 274MB. |
+| SentenceTransformers | `pip install sentence-transformers` | `BAAI/bge-m3` | Runs on CPU. Downloads on first use. |
+
+You still need an LLM API key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) for typed extraction and consolidation, even when using local embeddings.
 
 **Then add the [CLAUDE.md snippet](examples/CLAUDE.md.example) to your project.** This is what turns tools into a workflow. It tells your agent *when* to record decisions, surface tensions before new choices, and check blockers at session start. Without it, the tools are available but passive. With it, your agent proactively tracks your project's reasoning.
 
@@ -225,7 +285,7 @@ Under the hood: a local semantic graph with typed nodes, typed relationships, an
 
 | Package | What | Install |
 |:--------|:-----|:--------|
-| [flowscript-agents](https://pypi.org/project/flowscript-agents/) | Python SDK — 9 adapters, unified memory, consolidation, audit trail | `pip install flowscript-agents` |
+| [flowscript-agents](https://pypi.org/project/flowscript-agents/) | Python SDK — 9 adapters, unified memory, consolidation, audit trail | `pip install flowscript-agents openai` |
 | [flowscript-core](https://www.npmjs.com/package/flowscript-core) | TypeScript SDK — Memory class, 15 tools, token budgeting, audit trail | `npm install flowscript-core` |
 | [flowscript.org](https://flowscript.org) | Web editor, D3 visualization, live query panel | Browser |
 
