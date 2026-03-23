@@ -311,7 +311,7 @@ Under the hood: a local semantic graph with typed nodes, typed relationships, an
 | [flowscript-core](https://www.npmjs.com/package/flowscript-core) | TypeScript SDK — Memory class, 15 tools, token budgeting, audit trail | `npm install flowscript-core` |
 | [flowscript.org](https://flowscript.org) | Web editor, D3 visualization, live query panel | Browser |
 
-**1,272 tests** across Python (581) and TypeScript (691). Same audit trail format and canonical JSON serialization across both languages.
+**1,312 tests** across Python (581) and TypeScript (731). Same audit trail format and canonical JSON serialization across both languages.
 
 ### Docs
 
