@@ -27,13 +27,19 @@ just report what you found or stored. Treat memory like your own notes.
   consequences before committing.
 - **To correct mistakes:** Call `remove_memory` with a node_id (use
   `search_memory` first to find it) to remove incorrect or outdated entries.
-- **End of session:** When the user says "wrap up", "save what we learned",
-  or similar end-of-session phrases: review the conversation for any
-  decisions, tradeoffs, blockers, or reasoning that wasn't already stored
-  via `add_memory`. Save anything important you find. Then call
-  `session_wrap` to run lifecycle maintenance (graduation, pruning,
-  persist to disk). This is how memory gets smarter — each wrap
-  captures what matters and lets stale reasoning fade naturally.
+- **End of session:** When the user says "wrap up", "let's wrap",
+  "save what we learned", or signals the conversation is ending:
+  review for any decisions/tradeoffs/reasoning not yet stored via
+  `add_memory`, save what's important, then call `session_wrap`.
+  This is the reasoning graph's consolidation cycle — like sleep for
+  memory. Dormant nodes get pruned to the audit trail, frequently-used
+  knowledge graduates through temporal tiers (current → developing →
+  proven → foundation), and the graph gets smarter over time. Without
+  regular wraps, knowledge accumulates as noise instead of maturing.
+  NOTE: An auto-wrap safety net runs after 5 minutes of inactivity
+  and on process exit, but explicit wraps at session boundaries
+  produce the best results because you can review and store final
+  reasoning before consolidation happens.
 
 **What to remember (call `add_memory`):**
 - Decisions and their rationale ("We chose PostgreSQL because...")

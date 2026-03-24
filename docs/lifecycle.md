@@ -20,7 +20,19 @@ print(report.growing)  # list of node IDs in growing tier
 print(report.dormant)  # candidates for pruning
 ```
 
-Dormant nodes are pruned to the audit trail during `close()` or `sessionWrap()` — archived with full hash-chain provenance, never destroyed.
+Dormant nodes are pruned to the audit trail during `close()` or `session_wrap()` — archived with full hash-chain provenance, never destroyed.
+
+## Why Session Wraps Matter
+
+Just like a mind needs sleep to consolidate memories, the reasoning graph needs regular session wraps to develop intelligence over time. A session wrap is the consolidation cycle — without it, knowledge accumulates as noise instead of maturing through the temporal tiers above.
+
+**Three mechanisms ensure consolidation happens:**
+
+1. **Explicit wrap** — the LLM calls `session_wrap` when the user signals session end (best results)
+2. **Auto-wrap** — the MCP server auto-consolidates after 5 minutes of inactivity (configurable via `FLOWSCRIPT_AUTO_WRAP_MINUTES` env var, `0` to disable)
+3. **Process exit** — a final consolidation runs automatically when the MCP server shuts down
+
+For SDK users, all adapters call `session_wrap()` via their `close()` method or context manager exit.
 
 ## The `with` Pattern (Recommended)
 
@@ -99,3 +111,44 @@ mem = Memory.load_or_create("file.json",
 ## Session Start Deduplication
 
 `sessionStart()` calls both `blocked()` and `tensions()` internally (for the orientation summary). Touches from these calls are deduplicated — nodes aren't double-touched just because they appeared in both query results.
+
+## Writing Your Own Adapter
+
+If you're building an adapter for a framework not yet supported, wire session wraps using this pattern:
+
+```python
+class MyFrameworkAdapter:
+    def __init__(self, file_path, embedder=None, llm=None, consolidation_provider=None):
+        self._memory = Memory.load_or_create(file_path)
+        self._unified = UnifiedMemory(
+            file_path=file_path, embedder=embedder,
+            llm=llm, consolidation_provider=consolidation_provider,
+        )
+        self._memory.set_adapter_context("my_framework", "MyFrameworkAdapter", "init")
+        self._memory.session_start()
+
+    def close(self):
+        """End the session: prune dormant nodes, save. Returns SessionWrapResult."""
+        try:
+            if self._unified:
+                return self._unified.close()
+            return self._memory.session_wrap()
+        finally:
+            self._memory.clear_adapter_context()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.close()
+        except Exception:
+            if exc_type is None:
+                raise  # close() failure IS the error when no prior exception
+```
+
+**Key points:**
+- `close()` should call `session_wrap()` (via `UnifiedMemory.close()` or directly)
+- `clear_adapter_context()` goes in the `finally` block AFTER `session_wrap()` — session lifecycle events need adapter attribution
+- Context managers (`__enter__`/`__exit__`) make the `with` pattern work
+- `set_adapter_context()` should be called on construction, then `set_adapter_operation()` per-operation for granular audit attribution

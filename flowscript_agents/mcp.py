@@ -43,6 +43,12 @@ When OPENAI_API_KEY is set, the server auto-configures:
 - LLM extraction (gpt-4o-mini) for typed reasoning extraction
 - Consolidation (gpt-4o-mini) for memory management (UPDATE/RELATE/RESOLVE)
 
+Session lifecycle:
+- Auto-wrap safety net: consolidates memory after inactivity (default 5 min)
+  Configure: FLOWSCRIPT_AUTO_WRAP_MINUTES=10 (or 0 to disable)
+- Explicit session_wrap: LLM or user triggers consolidation at session end
+- atexit wrap: final consolidation when process exits
+
 Tools exposed (14):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
@@ -53,7 +59,7 @@ Tools exposed (14):
 - query_what_if: Trace downstream impact
 - query_alternatives: Reconstruct decision from options
 - remove_memory: Remove a node from memory
-- session_wrap: End-of-session lifecycle (graduation, pruning, save)
+- session_wrap: Session consolidation (graduation, pruning, audit trail, save)
 - memory_stats: Get memory statistics
 - query_audit: Search the audit trail with filters
 - verify_audit: Verify hash chain integrity
@@ -63,11 +69,14 @@ Tools exposed (14):
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime
 import hashlib
 import json
 import os
 import sys
+import threading
+import time
 from types import MappingProxyType
 from typing import Any, Optional
 
@@ -380,9 +389,15 @@ _TOOL_DEFS_RAW = [
     {
         "name": "session_wrap",
         "description": (
-            "Run memory lifecycle maintenance: prune dormant nodes to audit trail, "
-            "save to disk. Call this at the end of a work session to keep memory "
-            "healthy. Dormant nodes (not accessed recently) are archived, not deleted."
+            "Run memory lifecycle maintenance — the reasoning graph's consolidation "
+            "cycle. Prune dormant nodes to audit trail, graduate frequently-accessed "
+            "knowledge through temporal tiers, save to disk. Call this at the end of "
+            "a work session or when the user says to wrap up. Just like sleep "
+            "consolidates human memory, session wraps let the reasoning graph mature: "
+            "knowledge that keeps getting queried earns its place, one-off observations "
+            "fade naturally. An auto-wrap safety net runs after inactivity, but explicit "
+            "wraps at session boundaries produce the best results. Archived nodes are "
+            "preserved in the audit trail with full provenance — never destroyed."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
@@ -1069,6 +1084,70 @@ def run_server(
     umem.memory.set_adapter_context("mcp", "FlowScriptMCP", "server")
     handler = MCPHandler(umem)
 
+    # -------------------------------------------------------------------------
+    # Auto-wrap timer: consolidation safety net for when the LLM or user
+    # doesn't explicitly call session_wrap. Just like sleep consolidates
+    # human memory, auto-wrap ensures the reasoning graph matures even if
+    # the session boundary isn't explicitly marked.
+    #
+    # - Resets on every tool call (activity = timer restart)
+    # - Fires after FLOWSCRIPT_AUTO_WRAP_MINUTES of inactivity (default 5)
+    # - Set to 0 to disable
+    # - atexit handler provides a final wrap on process exit
+    # -------------------------------------------------------------------------
+    auto_wrap_minutes = int(os.environ.get("FLOWSCRIPT_AUTO_WRAP_MINUTES", "5"))
+    _auto_wrap_timer: list[Optional[threading.Timer]] = [None]  # mutable container for closure
+    _session_wrapped: list[bool] = [False]  # track if wrap already happened
+
+    def _do_auto_wrap() -> None:
+        """Execute auto-wrap. Called by timer thread or atexit."""
+        if _session_wrapped[0]:
+            return
+        _session_wrapped[0] = True
+        try:
+            umem.memory.session_wrap()
+            _log("Auto-wrap: session consolidated after inactivity")
+        except Exception as e:
+            _log(f"Auto-wrap failed: {e}")
+        try:
+            umem.save()
+        except Exception:
+            pass
+
+    def _reset_auto_wrap_timer() -> None:
+        """Cancel pending timer and start a new one. Called on each tool call."""
+        if auto_wrap_minutes <= 0:
+            return
+        # Cancel existing timer
+        if _auto_wrap_timer[0] is not None:
+            _auto_wrap_timer[0].cancel()
+        # If a previous auto-wrap fired, restart session for the new activity
+        if _session_wrapped[0]:
+            _session_wrapped[0] = False
+            try:
+                umem.memory.session_start()
+            except Exception:
+                pass
+        # Schedule new timer
+        timer = threading.Timer(auto_wrap_minutes * 60, _do_auto_wrap)
+        timer.daemon = True
+        timer.start()
+        _auto_wrap_timer[0] = timer
+
+    def _atexit_wrap() -> None:
+        """Final wrap on process exit — save state + consolidate."""
+        if _auto_wrap_timer[0] is not None:
+            _auto_wrap_timer[0].cancel()
+        if not _session_wrapped[0]:
+            _do_auto_wrap()
+
+    atexit.register(_atexit_wrap)
+
+    # Start the initial timer
+    if auto_wrap_minutes > 0:
+        _reset_auto_wrap_timer()
+        _log(f"Auto-wrap enabled: {auto_wrap_minutes}m inactivity threshold")
+
     try:
         for line in sys.stdin:
             line = line.strip()
@@ -1134,7 +1213,11 @@ def run_server(
             elif method == "tools/call":
                 tool_name = params.get("name", "")
                 tool_args = params.get("arguments", {})
+                _reset_auto_wrap_timer()  # Activity detected — reset consolidation timer
                 result = handler.handle_tool(tool_name, tool_args)
+                # If explicit session_wrap was called, mark it so auto-wrap doesn't double-fire
+                if tool_name == "session_wrap":
+                    _session_wrapped[0] = True
                 # Save after modifications
                 if tool_name in ("add_memory", "remove_memory", "session_wrap"):
                     try:
@@ -1158,13 +1241,12 @@ def run_server(
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
     finally:
-        # Safety net: save state when stdin closes (Claude Code exits).
-        # Use save() not close() — don't prune on unclean shutdown.
-        # Order: save first (may write audit entries), then clear context.
-        try:
-            umem.save()
-        except Exception:
-            pass
+        # Clean shutdown: cancel timer, run final wrap (via atexit if not
+        # already done), then clear adapter context.
+        if _auto_wrap_timer[0] is not None:
+            _auto_wrap_timer[0].cancel()
+        if not _session_wrapped[0]:
+            _do_auto_wrap()
         umem.memory.clear_adapter_context()
 
 

@@ -277,11 +277,39 @@ Framework attribution is automatic — every audit entry records which adapter t
 
 ---
 
-## Memory That Evolves
+## Session Lifecycle — How Memory Gets Smarter
 
-Nodes graduate through four temporal tiers based on actual use — `current` → `developing` → `proven` → `foundation`. Every query touches returned nodes, so knowledge that keeps getting queried earns its place. One-off observations fade naturally. Dormant nodes are pruned to the audit trail — archived with full provenance, never destroyed.
+Just like a mind needs sleep to consolidate memories, your agent's reasoning graph needs regular session wraps to develop intelligence over time. Without consolidation cycles, knowledge accumulates as noise instead of maturing.
 
-After 20 sessions, your memory is a curated knowledge base, not a pile of notes. [Session lifecycle details →](docs/lifecycle.md)
+**Temporal tiers** — nodes graduate based on actual use:
+
+| Tier | Meaning | Behavior |
+|:-----|:--------|:---------|
+| `current` | Recent observations | May be pruned if not reinforced |
+| `developing` | Emerging patterns (2+ touches) | Building confidence |
+| `proven` | Validated through use (3+ touches) | Protected from pruning |
+| `foundation` | Core truths | Always preserved |
+
+Every query touches returned nodes — knowledge that keeps getting queried earns its place. One-off observations fade naturally. Dormant nodes are pruned to the audit trail — archived with full provenance, never destroyed.
+
+**Three ways session wraps happen:**
+
+1. **Explicit** — the LLM calls the `session_wrap` tool when you say "let's wrap up" (best results)
+2. **Auto-wrap** — after 5 minutes of inactivity, the MCP server auto-consolidates (safety net, configurable via `FLOWSCRIPT_AUTO_WRAP_MINUTES`, set to `0` to disable)
+3. **Process exit** — when the MCP server shuts down, a final consolidation runs automatically
+
+**For SDK users** — adapters support context managers that auto-wrap:
+
+```python
+from flowscript_agents.adapters.langgraph import FlowScriptStore
+
+with FlowScriptStore("agent-memory.json") as store:
+    # work happens — all mutations auto-save
+    store.put(("agents",), "key", {"value": "data"})
+# close() fires automatically → session_wrap() + save
+```
+
+After 20 sessions, your memory is a curated knowledge base, not a pile of notes. [Full lifecycle details →](docs/lifecycle.md)
 
 ---
 
