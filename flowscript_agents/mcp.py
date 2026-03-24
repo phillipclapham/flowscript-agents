@@ -98,7 +98,7 @@ def _log(msg: str) -> None:
 
 _PROTOCOL_VERSION = "2025-03-26"
 _SERVER_NAME = "flowscript-agents"
-_SERVER_VERSION = "0.2.5"
+_SERVER_VERSION = "0.2.6"
 
 
 def _jsonrpc_response(id: Any, result: Any) -> dict:
