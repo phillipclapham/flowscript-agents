@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Agent memory that tracks why you decided, what conflicts, and what's blocked. Not just what was said.</strong></p>
 
-[![Tests](https://img.shields.io/badge/tests-581%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
+[![Tests](https://img.shields.io/badge/tests-584%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
 ---
 
@@ -351,7 +351,7 @@ Under the hood: a local semantic graph with typed nodes, typed relationships, an
 | [flowscript-core](https://www.npmjs.com/package/flowscript-core) | TypeScript SDK — Memory class, 15 tools, token budgeting, audit trail | `npm install flowscript-core` |
 | [flowscript.org](https://flowscript.org) | Web editor, D3 visualization, live query panel | Browser |
 
-**1,312 tests** across Python (581) and TypeScript (731). Same audit trail format and canonical JSON serialization across both languages.
+**1,315 tests** across Python (584) and TypeScript (731). Same audit trail format and canonical JSON serialization across both languages.
 
 ### Docs
 
