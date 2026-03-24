@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,10 @@ class AuditConfig:
             full entry dict AFTER disk write. Callback failure never blocks
             audit persistence. Use for SIEM integration, Observatory, or custom
             monitoring.
+        on_event_async: If True, fire on_event in a background thread so slow
+            webhooks or network I/O don't block agent operations. Events are
+            dispatched in order (single worker thread). Callback errors are
+            logged to stderr but never propagate. Default False (synchronous).
     """
 
     rotation: str = "monthly"
@@ -67,6 +72,7 @@ class AuditConfig:
     verbosity: str = "standard"
     encryption: Literal["none", "aes-256-gcm"] = "none"
     on_event: Optional[Callable[[dict[str, Any]], None]] = None
+    on_event_async: bool = False
 
     def __post_init__(self) -> None:
         if self.encryption != "none":
@@ -147,6 +153,33 @@ class AuditWriter:
         self._current_period = ""
         self._initialized = False
         self._in_cleanup = False  # Guard against recursive cleanup → write → rotate → cleanup
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the background executor for async on_event dispatch."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="audit_on_event",
+            )
+        return self._executor
+
+    def close(self) -> None:
+        """Shutdown the async executor, waiting for all pending callbacks to complete.
+
+        Call this to ensure in-flight on_event callbacks (e.g. webhook POSTs)
+        have finished before process exit. Safe to call multiple times.
+        """
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    def _fire_on_event(self, entry: dict[str, Any]) -> None:
+        """Fire the on_event callback with error isolation."""
+        try:
+            self._config.on_event(entry)  # type: ignore[misc]
+        except Exception as e:
+            print(f"AuditWriter: on_event callback failed: {e}", file=sys.stderr)
 
     # -------------------------------------------------------------------------
     # Path derivation
@@ -371,10 +404,10 @@ class AuditWriter:
 
         # Fire on_event callback (failure must never block audit, but log to stderr)
         if self._config.on_event:
-            try:
-                self._config.on_event(entry)
-            except Exception as e:
-                print(f"AuditWriter: on_event callback failed: {e}", file=sys.stderr)
+            if self._config.on_event_async:
+                self._get_executor().submit(self._fire_on_event, entry)
+            else:
+                self._fire_on_event(entry)
 
         return entry
 

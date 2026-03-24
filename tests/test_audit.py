@@ -589,6 +589,152 @@ class TestOnEventCallback:
 
 
 # =============================================================================
+# on_event_async callback
+# =============================================================================
+
+
+class TestOnEventAsync:
+    """Async on_event dispatch — webhook latency must not block agent operations."""
+
+    def test_async_callback_fires_for_every_entry(self):
+        """All events arrive eventually when on_event_async=True."""
+        import threading
+
+        captured = []
+        lock = threading.Lock()
+
+        def callback(entry):
+            with lock:
+                captured.append(entry)
+
+        config = AuditConfig(on_event=callback, on_event_async=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            mem_path = Path(td) / "mem.json"
+            writer = AuditWriter(mem_path, config)
+            writer.write("event_1", {"a": 1})
+            writer.write("event_2", {"b": 2})
+            writer.write("event_3", {"c": 3})
+            # close() flushes executor — waits for all callbacks to complete
+            writer.close()
+
+        assert len(captured) == 3
+        assert [e["event"] for e in captured] == ["event_1", "event_2", "event_3"]
+
+    def test_async_callback_preserves_event_ordering(self):
+        """Serial executor (max_workers=1) delivers events in write order."""
+        import threading
+
+        order = []
+        lock = threading.Lock()
+
+        def callback(entry):
+            with lock:
+                order.append(entry["seq"])
+
+        config = AuditConfig(on_event=callback, on_event_async=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            mem_path = Path(td) / "mem.json"
+            writer = AuditWriter(mem_path, config)
+            for i in range(10):
+                writer.write(f"event_{i}", {})
+            writer.close()
+
+        assert order == list(range(10))
+
+    def test_async_callback_failure_does_not_propagate(self):
+        """Bad async callback logs to stderr but never surfaces as exception."""
+        import io
+
+        def exploding_callback(entry):
+            raise ValueError("webhook down")
+
+        config = AuditConfig(on_event=exploding_callback, on_event_async=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            mem_path = Path(td) / "mem.json"
+            writer = AuditWriter(mem_path, config)
+            entry = writer.write("test", {})
+            writer.close()  # flush — error happens here, not during write()
+
+        # Entry was returned synchronously (disk write succeeded before async dispatch)
+        assert entry is not None
+        assert entry["event"] == "test"
+
+    def test_async_write_returns_immediately(self):
+        """write() returns before the callback completes when on_event_async=True."""
+        import threading
+        import time
+
+        barrier = threading.Event()
+        completed = threading.Event()
+
+        def slow_callback(entry):
+            barrier.wait(timeout=5)  # Block until test releases
+            completed.set()
+
+        config = AuditConfig(on_event=slow_callback, on_event_async=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            mem_path = Path(td) / "mem.json"
+            writer = AuditWriter(mem_path, config)
+
+            # write() should return immediately (callback is blocked)
+            entry = writer.write("test", {})
+            assert entry is not None
+            assert not completed.is_set()  # Callback not done yet
+
+            # Unblock callback and wait for completion
+            barrier.set()
+            writer.close()
+
+        assert completed.is_set()
+
+    def test_close_is_idempotent(self):
+        """close() can be called multiple times without error."""
+        config = AuditConfig(on_event=lambda e: None, on_event_async=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            mem_path = Path(td) / "mem.json"
+            writer = AuditWriter(mem_path, config)
+            writer.write("test", {})
+            writer.close()
+            writer.close()  # Should not raise
+
+    def test_sync_is_default(self):
+        """on_event_async defaults to False — behavior unchanged for existing callers."""
+        config = AuditConfig()
+        assert config.on_event_async is False
+
+    def test_sync_and_async_produce_same_entries(self):
+        """Sync and async modes deliver identical entry dicts."""
+        sync_captured = []
+        async_captured = []
+
+        with tempfile.TemporaryDirectory() as td:
+            # Sync writer
+            mem_path_sync = Path(td) / "sync.json"
+            sync_writer = AuditWriter(mem_path_sync, AuditConfig(on_event=sync_captured.append))
+            sync_writer.write("test_event", {"x": 42})
+
+            # Async writer
+            mem_path_async = Path(td) / "async.json"
+            async_writer = AuditWriter(
+                mem_path_async,
+                AuditConfig(on_event=async_captured.append, on_event_async=True),
+            )
+            async_writer.write("test_event", {"x": 42})
+            async_writer.close()
+
+        assert len(sync_captured) == 1
+        assert len(async_captured) == 1
+        # Same fields (seq/prev_hash differ because different files, but event/data match)
+        assert sync_captured[0]["event"] == async_captured[0]["event"]
+        assert sync_captured[0]["data"] == async_captured[0]["data"]
+
+
+# =============================================================================
 # Memory integration
 # =============================================================================
 
