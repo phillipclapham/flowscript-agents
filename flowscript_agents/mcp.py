@@ -681,9 +681,18 @@ class MCPHandler:
         result = self._umem.memory.session_wrap()
         return {
             "nodes_before": result.nodes_before,
+            "tiers_before": result.tiers_before,
             "nodes_after": result.nodes_after,
-            "nodes_pruned": result.pruned.count,
             "tiers_after": result.tiers_after,
+            "nodes_pruned": result.pruned.count,
+            "pruned_node_ids": result.pruned.archived,
+            "garden_after": {
+                "growing": len(result.garden_after.growing),
+                "resting": len(result.garden_after.resting),
+                "dormant": len(result.garden_after.dormant),
+            },
+            "saved": result.saved,
+            "path": result.path,
         }
 
     def _memory_stats(self, args: dict) -> dict:
@@ -1098,21 +1107,30 @@ def run_server(
     auto_wrap_minutes = int(os.environ.get("FLOWSCRIPT_AUTO_WRAP_MINUTES", "5"))
     _auto_wrap_timer: list[Optional[threading.Timer]] = [None]  # mutable container for closure
     _session_wrapped: list[bool] = [False]  # track if wrap already happened
+    _wrap_lock = threading.Lock()  # protects _session_wrapped check-then-act
 
     def _do_auto_wrap() -> None:
-        """Execute auto-wrap. Called by timer thread or atexit."""
-        if _session_wrapped[0]:
-            return
-        _session_wrapped[0] = True
+        """Execute auto-wrap. Called by timer thread or atexit.
+
+        Uses _wrap_lock to prevent race between timer thread and main thread
+        both calling session_wrap() simultaneously. The lock protects the
+        check-then-act on _session_wrapped — without it, both threads could
+        read False, set True, and proceed to concurrent session_wrap() calls
+        that corrupt the audit hash chain.
+        """
+        with _wrap_lock:
+            if _session_wrapped[0]:
+                return
+            _session_wrapped[0] = True
+        # Lock released — flag prevents re-entry, and session_wrap() is now
+        # safe to run without holding the lock (main thread won't enter).
         try:
             umem.memory.session_wrap()
+            # session_wrap() calls session_end() which calls save() internally,
+            # so no additional umem.save() needed here.
             _log("Auto-wrap: session consolidated after inactivity")
         except Exception as e:
             _log(f"Auto-wrap failed: {e}")
-        try:
-            umem.save()
-        except Exception:
-            pass
 
     def _reset_auto_wrap_timer() -> None:
         """Cancel pending timer and start a new one. Called on each tool call."""
@@ -1122,12 +1140,13 @@ def run_server(
         if _auto_wrap_timer[0] is not None:
             _auto_wrap_timer[0].cancel()
         # If a previous auto-wrap fired, restart session for the new activity
-        if _session_wrapped[0]:
-            _session_wrapped[0] = False
-            try:
-                umem.memory.session_start()
-            except Exception:
-                pass
+        with _wrap_lock:
+            if _session_wrapped[0]:
+                _session_wrapped[0] = False
+                try:
+                    umem.memory.session_start()
+                except Exception:
+                    pass
         # Schedule new timer
         timer = threading.Timer(auto_wrap_minutes * 60, _do_auto_wrap)
         timer.daemon = True
@@ -1217,9 +1236,11 @@ def run_server(
                 result = handler.handle_tool(tool_name, tool_args)
                 # If explicit session_wrap was called, mark it so auto-wrap doesn't double-fire
                 if tool_name == "session_wrap":
-                    _session_wrapped[0] = True
-                # Save after modifications
-                if tool_name in ("add_memory", "remove_memory", "session_wrap"):
+                    with _wrap_lock:
+                        _session_wrapped[0] = True
+                # Save after modifications (session_wrap saves internally, but
+                # add_memory/remove_memory need explicit save for vector index)
+                if tool_name in ("add_memory", "remove_memory"):
                     try:
                         umem.save()
                     except ValueError:
