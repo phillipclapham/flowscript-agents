@@ -42,9 +42,11 @@ from .memory import (
     SessionWrapResult,
 )
 from .unified import UnifiedMemory
+from .explain import explain
 
 __version__ = "0.2.5"
 __all__ = [
+    "explain",
     "AuditConfig",
     "AuditQueryResult",
     "AuditVerifyResult",
