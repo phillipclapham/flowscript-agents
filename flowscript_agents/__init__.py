@@ -44,7 +44,7 @@ from .memory import (
 from .unified import UnifiedMemory
 from .explain import explain
 
-__version__ = "0.2.5"
+__version__ = "0.2.7"
 __all__ = [
     "explain",
     "AuditConfig",

@@ -20,6 +20,7 @@ File layout:
 from __future__ import annotations
 
 import gzip
+import atexit
 import hashlib
 import json
 import os
@@ -162,6 +163,7 @@ class AuditWriter:
                 max_workers=1,
                 thread_name_prefix="audit_on_event",
             )
+            atexit.register(self.close)
         return self._executor
 
     def close(self) -> None:

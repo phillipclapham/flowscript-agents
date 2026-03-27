@@ -49,15 +49,16 @@ Session lifecycle:
 - Explicit session_wrap: LLM or user triggers consolidation at session end
 - atexit wrap: final consolidation when process exits
 
-Tools exposed (14):
+Tools exposed (15):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
 - get_context: Get formatted memory for prompt injection
 - query_tensions: Find all tensions/tradeoffs in memory
 - query_blocked: Find all blocked items with impact analysis
-- query_why: Trace causal chain for a node
+- query_why: Trace causal chain for a node (returns structured data)
 - query_what_if: Trace downstream impact
 - query_alternatives: Reconstruct decision from options
+- explain_decision: Generate deterministic Article 86 compliance explanation
 - remove_memory: Remove a node from memory
 - session_wrap: Session consolidation (graduation, pruning, audit trail, save)
 - memory_stats: Get memory statistics
@@ -454,6 +455,59 @@ _TOOL_DEFS_RAW = [
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
+    {
+        "name": "explain_decision",
+        "description": (
+            "Generate a deterministic, reproducible explanation of why a decision "
+            "was made. Produces compliance-ready text suitable for EU AI Act "
+            "Article 86 (Right to Explanation). Unlike query_why which returns "
+            "raw causal data for you to interpret, this tool returns a finished "
+            "plain-language document — same input always produces the same output. "
+            "Use 'general' for affected individuals, 'legal' for regulatory "
+            "submissions, 'technical' for developer debugging."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string", "description": "Node ID to explain"},
+                "content": {
+                    "type": "string",
+                    "description": "Search for node by content (alternative to node_id)",
+                },
+                "audience": {
+                    "type": "string",
+                    "enum": ["general", "legal", "technical"],
+                    "description": (
+                        "Output mode: 'general' = plain English for non-technical "
+                        "individuals (default), 'legal' = formal compliance language "
+                        "with Article 86 citation and hash-chain reference, "
+                        "'technical' = structured representation for debugging"
+                    ),
+                    "default": "general",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": (
+                        "Optional label for the affected entity (e.g. 'Applicant ID #4821'). "
+                        "Included in legal-mode headers. Use pseudonymized identifiers "
+                        "for GDPR compliance."
+                    ),
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["chain", "minimal", "tree"],
+                    "description": (
+                        "Causal query format: 'chain' (default) = full causal ancestry, "
+                        "'minimal' = root cause + path, 'tree' = all contributing factors. "
+                        "Note: 'minimal' omits the target decision — use 'chain' or 'tree' "
+                        "for full Article 86 compliance."
+                    ),
+                    "default": "chain",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 # Deep-freeze all tool definitions — any in-process mutation raises TypeError.
@@ -534,6 +588,7 @@ class MCPHandler:
             "memory_stats": self._memory_stats,
             "query_audit": self._query_audit,
             "verify_audit": self._verify_audit,
+            "explain_decision": self._explain_decision,
             "verify_integrity": self._verify_integrity,
         }
         handler = handlers.get(name)
@@ -779,6 +834,44 @@ class MCPHandler:
             return {"valid": None, "total_entries": 0, "files_verified": 0,
                     "status": "no_audit_trail",
                     "note": "No audit trail file found — auditing may not be configured"}
+
+    def _explain_decision(self, args: dict) -> dict:
+        """Generate deterministic Article 86 compliance explanation."""
+        from .explain import explain
+
+        node_id = args.get("node_id")
+        content = args.get("content")
+        audience = args.get("audience", "general")
+        subject = args.get("subject")
+        fmt = args.get("format", "chain")
+
+        # Find the node
+        if not node_id and content:
+            refs = self._umem.memory.find_nodes(content)
+            if refs:
+                node_id = refs[0].id
+        if not node_id:
+            return {"error": "No node found. Provide node_id or searchable content."}
+
+        # Query causal chain
+        try:
+            why_result = self._umem.memory.query.why(node_id, format=fmt)
+        except Exception as e:
+            return {"error": f"Failed to query causal chain: {e}"}
+
+        # Generate explanation
+        try:
+            text = explain(why_result, subject=subject, audience=audience)
+        except (TypeError, ValueError) as e:
+            return {"error": f"Failed to generate explanation: {e}"}
+
+        return {
+            "explanation": text,
+            "audience": audience,
+            "format": fmt,
+            "node_id": node_id,
+            "deterministic": True,
+        }
 
     def _verify_integrity(self, args: dict) -> dict:
         """Verify in-process description integrity of all tool definitions."""

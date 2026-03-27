@@ -274,7 +274,22 @@ result = Memory.verify_audit("agent.audit.jsonl")
 # → AuditVerifyResult(valid=True, total_entries=42, files_verified=1)
 ```
 
-Framework attribution is automatic — every audit entry records which adapter triggered it. Query by time range, event type, adapter, or session. Rotation with gzip compression. `on_event` callback for SIEM integration. [Full audit trail docs →](docs/audit-trail.md)
+Framework attribution is automatic — every audit entry records which adapter triggered it. Query by time range, event type, adapter, or session. Rotation with gzip compression.
+
+**SIEM integration:** `on_event` callback fires for every audit entry. Use `on_event_async=True` for non-blocking dispatch — slow webhooks won't block agent operations:
+
+```python
+from flowscript_agents import Memory, MemoryOptions, AuditConfig
+
+def send_to_siem(entry):
+    requests.post("https://siem.example.com/ingest", json=entry)
+
+mem = Memory.load_or_create("agent.json", options=MemoryOptions(
+    audit=AuditConfig(on_event=send_to_siem, on_event_async=True)
+))
+```
+
+Events are dispatched in order (single worker thread). Callback failures log to stderr but never block audit writes. Call `writer.close()` for graceful shutdown of in-flight callbacks.
 
 ---
 
@@ -352,13 +367,59 @@ Vector search and reasoning queries are orthogonal — use both. Mem0 for retrie
 
 FlowScript's typed reasoning chains are also compliance-ready audit infrastructure. This isn't a separate product — it's a structural property of how FlowScript works.
 
-**EU AI Act (Articles 12, 13, 86):**
+**EU AI Act coverage:**
 
 | Requirement | Article | How FlowScript satisfies it |
 |:---|:---|:---|
 | Record-keeping | Art. 12 | Hash-chained audit trail, append-only, tamper-evident, 7yr default retention |
 | Transparency | Art. 13 | `why()` queries return typed causal chains — not reconstructions, actual reasoning records |
-| Right to explanation | Art. 86 | `alternatives()` reconstructs what was considered, what was chosen, and the rationale |
+| Right to explanation | Art. 86 | `explain()` generates deterministic, reproducible compliance documents from `why()` results |
+| Monitoring | Art. 72 | `on_event` / `on_event_async` callbacks stream audit events to SIEM/monitoring systems |
+
+**Article 86 — Right to Explanation:**
+
+```python
+from flowscript_agents import Memory, explain
+
+mem = Memory.load_or_create("agent.json")
+# ... agent builds reasoning graph during normal work ...
+
+result = mem.query.why(decision_node.id)
+print(explain(result, subject="Applicant ID #4821", audience="legal"))
+```
+
+```
+AUTOMATED DECISION EXPLANATION
+Issued under EU AI Act Article 86 (Right to Explanation)
+
+Subject: Applicant ID #4821
+Decision: loan application denied
+Causal chain depth: 3 steps
+
+CAUSAL SEQUENCE
+  Step 1 (foundational factor): applicant income below minimum requirement
+  Step 2 (derives from): debt-to-income ratio exceeds policy limit
+  Step 3 (derives from): risk assessment: HIGH
+  Outcome: loan application denied
+
+CERTIFICATION
+Generated: 2026-03-27T19:46:46Z
+This explanation is generated from a deterministic causal reasoning graph
+maintained by FlowScript. The complete hash-chained audit trail is available
+upon request and can be verified against the original reasoning record.
+```
+
+Three audience modes: `"general"` (plain English for affected individuals), `"legal"` (formal compliance language with Article 86 citation and hash-chain reference), `"technical"` (structured debug output). No LLM in the loop — the explanation is deterministic and reproducible.
+
+**Via MCP:** call the `explain_decision` tool with a node ID or content search. Same deterministic output, accessible from Claude Code, Cursor, or any MCP client.
+
+**Via framework adapters:** access the underlying Memory through `adapter.memory`:
+
+```python
+from flowscript_agents import explain
+result = adapter.memory.query.why(node_id)
+text = explain(result, audience="legal")
+```
 
 **Enforcement begins August 2026.** Audit trails can't be backdated. Organizations using FlowScript today have unbroken reasoning records from day one. You can turn on logging tomorrow — you can't manufacture the last 18 months of decision provenance.
 
@@ -372,6 +433,7 @@ FlowScript's typed reasoning chains are also compliance-ready audit infrastructu
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
 │  │  Memory   │ │ Queries  │ │ Audit Trail          │ │
 │  │  (graph)  │ │ (5 ops)  │ │ (SHA-256 hash chain) │ │
+│  │         explain()      │ │  on_event_async      │ │
 │  └──────────┘ └──────────┘ └──────────────────────┘ │
 ├─────────────────────────────────────────────────────┤
 │  Your Storage (files, database, cloud)              │

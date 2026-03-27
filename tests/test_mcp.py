@@ -31,7 +31,7 @@ class TestToolDefinitions:
             assert "inputSchema" in tool
 
     def test_tool_count(self):
-        assert len(TOOLS) == 13
+        assert len(TOOLS) == 14
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
@@ -40,7 +40,7 @@ class TestToolDefinitions:
             "query_tensions", "query_blocked", "query_why",
             "query_what_if", "query_alternatives",
             "remove_memory", "session_wrap", "memory_stats",
-            "query_audit", "verify_audit",
+            "query_audit", "verify_audit", "explain_decision",
         }
         assert names == expected
 
@@ -297,7 +297,7 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 14  # 13 verified + verify_integrity
+        assert len(tools) == 15  # 14 verified + verify_integrity
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names
@@ -500,6 +500,73 @@ class TestVersionNegotiation:
         assert _PROTOCOL_VERSION >= "2025-03-26"
 
 
+class TestExplainDecision:
+    """Tests for the explain_decision MCP tool (Article 86 compliance)."""
+
+    def test_general_audience(self):
+        handler, umem = _make_handler()
+        cause = umem.memory.statement("credit score below threshold")
+        effect = umem.memory.statement("loan denied")
+        cause.causes(effect)
+        result = handler.handle_tool("explain_decision", {
+            "content": "loan denied", "audience": "general",
+        })
+        assert "error" not in result
+        assert "Decision Explanation" in result["explanation"]
+        assert result["deterministic"] is True
+
+    def test_legal_audience_with_subject(self):
+        handler, umem = _make_handler()
+        cause = umem.memory.statement("income below minimum")
+        effect = umem.memory.statement("application rejected")
+        cause.causes(effect)
+        result = handler.handle_tool("explain_decision", {
+            "content": "application rejected",
+            "audience": "legal",
+            "subject": "Applicant #42",
+        })
+        assert "Article 86" in result["explanation"]
+        assert "Applicant #42" in result["explanation"]
+        assert "Generated:" in result["explanation"]
+
+    def test_not_found(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("explain_decision", {"content": "nonexistent"})
+        assert "error" in result
+
+    def test_deterministic(self):
+        handler, umem = _make_handler()
+        umem.memory.statement("fact A")
+        effect = umem.memory.statement("conclusion B")
+        umem.memory.ref(umem.memory.nodes[0].id).causes(effect)
+        r1 = handler.handle_tool("explain_decision", {"content": "conclusion B"})
+        r2 = handler.handle_tool("explain_decision", {"content": "conclusion B"})
+        # Exclude timestamp line for determinism check
+        lines1 = [l for l in r1["explanation"].split("\n") if not l.startswith("Generated:")]
+        lines2 = [l for l in r2["explanation"].split("\n") if not l.startswith("Generated:")]
+        assert lines1 == lines2
+
+    def test_tree_format(self):
+        handler, umem = _make_handler()
+        a = umem.memory.statement("root cause")
+        b = umem.memory.statement("intermediate")
+        c = umem.memory.statement("final outcome")
+        a.causes(b)
+        b.causes(c)
+        result = handler.handle_tool("explain_decision", {
+            "content": "final outcome", "format": "tree",
+        })
+        assert "error" not in result
+        assert result["format"] == "tree"
+        assert "factor" in result["explanation"].lower()
+
+    def test_default_audience_is_general(self):
+        handler, umem = _make_handler()
+        umem.memory.statement("test node")
+        result = handler.handle_tool("explain_decision", {"content": "test node"})
+        assert result["audience"] == "general"
+
+
 class TestDescriptionIntegrity:
     """Tests for the three-layer MCP description integrity system."""
 
@@ -523,7 +590,7 @@ class TestDescriptionIntegrity:
         result = handler.handle_tool("verify_integrity", {})
         assert result["verdict"] == "PASS"
         assert result["count_match"] is True
-        assert result["tool_count"] == 13  # verified tools (not counting verify_integrity itself)
+        assert result["tool_count"] == 14  # verified tools (not counting verify_integrity itself)
 
     def test_verify_integrity_per_tool_status(self):
         """Each tool should have pass status with matching hashes."""

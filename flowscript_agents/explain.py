@@ -37,6 +37,7 @@ Usage:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Union
 
 from .query import CausalAncestry, CausalTree, CausalTreeNode, MinimalWhy
@@ -75,6 +76,13 @@ def explain(
 
     Returns:
         A human-readable string explanation.
+
+    Note:
+        ``MinimalWhy`` (format="minimal") contains only the causal chain
+        (ancestors), not the target decision. For full Article 86 compliance
+        — where the affected person must know WHAT decision was made —
+        use format="chain" (``CausalAncestry``) or format="tree"
+        (``CausalTree``).
 
     Raises:
         TypeError: If why_result is not a recognised why() return type.
@@ -237,6 +245,9 @@ def _ancestry_legal(
     lines.append("CERTIFICATION")
     lines.append("")
     lines.append(
+        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    )
+    lines.append(
         "This explanation is generated from a deterministic causal reasoning "
         "graph maintained by FlowScript. The causal chain accurately reflects "
         "the reasoning recorded at the time of the decision. The complete "
@@ -297,6 +308,9 @@ def _explain_minimal(
                 lines.append(f"  Step {i + 1}: {step}")
         lines.append("")
         lines.append(
+            f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        lines.append(
             "This explanation is generated from a deterministic causal reasoning "
             "graph. The complete audit trail is available upon request."
         )
@@ -345,6 +359,9 @@ def _explain_tree(
         _render_tree_general(result.tree, lines, indent=2)
         lines.append("")
         lines.append(
+            f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        lines.append(
             "This explanation is generated from a deterministic causal reasoning "
             "graph. The complete audit trail is available upon request."
         )
@@ -387,6 +404,7 @@ def _humanize_relationship(rel_type: str | None) -> str:
         "alternative": "as an alternative",
         "blocks": "which was blocked by",
         "tension": "in tension with",
-        None: "which follows from",
     }
-    return mapping.get(rel_type or "", f"({rel_type})")
+    if rel_type is None:
+        return "which follows from"
+    return mapping.get(rel_type, f"({rel_type})")
