@@ -624,10 +624,35 @@ class AutoExtract:
                 "content": extracted_node.content,
             })
 
-        # Run consolidation
+        # Capture pre-consolidation graph hash for attestation
+        pre_hash = None
+        try:
+            from ..fixpoint import FixpointContext
+            pre_hash = FixpointContext._compute_graph_hash_static(self._memory)
+        except Exception:
+            pass  # Attestation is optional — consolidation always runs
+
+        # Run consolidation (always runs — this is the core operation)
         consolidation_result = self._consolidation_engine.consolidate(
             extracted_node_dicts, node_refs
         )
+
+        # Wrap with fixpoint attestation (fail-open: never blocks consolidation)
+        try:
+            from ..fixpoint import FixpointContext
+
+            with FixpointContext(self._memory, name="consolidation", constraint="L1",
+                                _pre_hash=pre_hash) as fix_ctx:
+                delta = (
+                    consolidation_result.nodes_added
+                    + consolidation_result.nodes_updated
+                    + consolidation_result.nodes_related
+                    + consolidation_result.nodes_resolved
+                )
+                fix_ctx.record_iteration(delta)
+                fix_ctx.record_iteration(0)  # convergence marker (degenerate @fix)
+        except Exception as e:
+            print(f"AutoExtract: fixpoint attestation failed: {e}", file=sys.stderr)
 
         # Create extraction relationships for surviving nodes only
         # (consolidation may have removed some via UPDATE/NONE)
