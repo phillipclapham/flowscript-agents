@@ -19,6 +19,7 @@ File layout:
 
 from __future__ import annotations
 
+import copy
 import gzip
 import atexit
 import hashlib
@@ -407,7 +408,10 @@ class AuditWriter:
         # Fire on_event callback (failure must never block audit, but log to stderr)
         if self._config.on_event:
             if self._config.on_event_async:
-                self._get_executor().submit(self._fire_on_event, entry)
+                # Deep copy to prevent caller mutation between write() return and
+                # async callback execution from producing different canonical JSON
+                # (which would break hash chain verification in CloudClient).
+                self._get_executor().submit(self._fire_on_event, copy.deepcopy(entry))
             else:
                 self._fire_on_event(entry)
 

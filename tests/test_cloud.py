@@ -107,21 +107,19 @@ class TestCloudClientBuffering:
         client = CloudClient(api_key="fsk_test", namespace="test/agent", batch_size=3)
         entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
 
-        # Mock the HTTP call to avoid network
-        with patch.object(client, "_flush_locked", wraps=client._flush_locked) as mock_flush:
-            # Patch urlopen to return a mock response
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = json.dumps({"accepted": 3, "witness": None}).encode()
-            mock_resp.status = 200
-            mock_resp.__enter__ = lambda s: s
-            mock_resp.__exit__ = MagicMock(return_value=False)
+        # Patch urlopen to return a mock response
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"accepted": 3, "witness": None}).encode()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
 
-            with patch("urllib.request.urlopen", return_value=mock_resp):
-                client.queue_event(entry)
-                client.queue_event(entry)
-                assert client.buffered_count == 2
-                client.queue_event(entry)  # This should trigger auto-flush
-                assert client.buffered_count == 0
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client.queue_event(entry)
+            client.queue_event(entry)
+            assert client.buffered_count == 2
+            client.queue_event(entry)  # This should trigger auto-flush
+            assert client.buffered_count == 0
 
     def test_thread_safety(self):
         """Verify concurrent queue_event calls don't corrupt buffer."""
@@ -139,6 +137,64 @@ class TestCloudClientBuffering:
             t.join()
 
         assert client.buffered_count == 1000
+
+
+class TestCloudClientBufferOverflow:
+    """Test buffer overflow protection."""
+
+    def test_drops_events_at_max_buffer_size(self):
+        """Events beyond max_buffer_size are dropped (not lost — on disk)."""
+        client = CloudClient(api_key="fsk_test", namespace="test/agent", batch_size=10000, max_buffer_size=5)
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+
+        for _ in range(10):
+            client.queue_event(entry)
+
+        assert client.buffered_count == 5
+        assert client.total_dropped == 5
+
+    def test_drop_warning_rate_limited(self, capsys):
+        """Warning prints on first drop and every 1000th, not every drop."""
+        client = CloudClient(api_key="fsk_test", namespace="test/agent", batch_size=10000, max_buffer_size=1)
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+
+        # Fill buffer
+        client.queue_event(entry)
+        # Drop 3 more
+        for _ in range(3):
+            client.queue_event(entry)
+
+        captured = capsys.readouterr()
+        # Should have exactly 1 warning (first drop), not 3
+        assert captured.err.count("buffer full") == 1
+        assert client.total_dropped == 3
+
+    def test_buffer_accepts_again_after_flush(self):
+        """After flushing, buffer accepts new events even if drops occurred."""
+        client = CloudClient(api_key="fsk_test", namespace="test/agent", batch_size=10000, max_buffer_size=2)
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+
+        # Fill and overflow
+        for _ in range(5):
+            client.queue_event(entry)
+        assert client.buffered_count == 2
+        assert client.total_dropped == 3
+
+        # Flush (mock HTTP)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"accepted": 2, "witness": None}).encode()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client.flush()
+
+        assert client.buffered_count == 0
+
+        # Should accept again
+        client.queue_event(entry)
+        assert client.buffered_count == 1
 
 
 class TestCloudClientErrorHandling:
@@ -190,6 +246,72 @@ class TestCloudClientErrorHandling:
             result = client.flush()
             assert result.error is not None
             assert client.buffered_count == 1  # Put back
+
+
+class TestCloudClientMalformedResponse:
+    """Test handling of malformed server responses."""
+
+    def test_malformed_witness_does_not_lose_events(self):
+        """If witness response is malformed, events are still counted as accepted."""
+        client = CloudClient(api_key="fsk_test", namespace="test/agent")
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+        client.queue_event(entry)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "accepted": 1,
+            "witness": {"garbage": True},  # missing required fields
+        }).encode()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = client.flush()
+
+        assert result.accepted == 1
+        assert client.total_accepted == 1
+        assert client.last_witness is None  # Not updated with garbage
+        assert client.buffered_count == 0  # Events NOT put back
+
+    def test_on_error_callback_fires_on_failure(self):
+        """Verify on_error callback is invoked on flush failure."""
+        errors = []
+        client = CloudClient(
+            api_key="fsk_test",
+            namespace="test/agent",
+            on_error=lambda r: errors.append(r),
+        )
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+        client.queue_event(entry)
+
+        import urllib.error
+        error = urllib.error.HTTPError("http://test", 409, "Conflict", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error):
+            client.flush()
+
+        assert len(errors) == 1
+        assert errors[0].status_code == 409
+
+    def test_on_error_exception_swallowed(self):
+        """Exceptions in on_error callback must not propagate."""
+        def bad_callback(result):
+            raise RuntimeError("callback boom")
+
+        client = CloudClient(
+            api_key="fsk_test",
+            namespace="test/agent",
+            on_error=bad_callback,
+        )
+        entry = {"v": 1, "seq": 0, "event": "test", "data": {}, "timestamp": "T", "prev_hash": "sha256:GENESIS", "session_id": None, "adapter": None}
+        client.queue_event(entry)
+
+        import urllib.error
+        error = urllib.error.HTTPError("http://test", 400, "Bad Request", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error):
+            # Should not raise despite bad callback
+            result = client.flush()
+            assert result.error is not None
 
 
 class TestAuditWriterIntegration:

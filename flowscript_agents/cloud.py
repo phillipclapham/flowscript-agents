@@ -40,7 +40,7 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 # =============================================================================
@@ -49,8 +49,16 @@ from typing import Any, Optional
 
 DEFAULT_CLOUD_URL = "https://api.flowscript.org"
 DEFAULT_BATCH_SIZE = 100
+DEFAULT_MAX_BUFFER_SIZE = 10000
 DEFAULT_FLUSH_INTERVAL = 5.0  # seconds (for future auto-flush)
-USER_AGENT = "flowscript-agents-python/0.2.8"
+def _get_user_agent() -> str:
+    try:
+        from flowscript_agents import __version__
+        return f"flowscript-agents-python/{__version__}"
+    except ImportError:
+        return "flowscript-agents-python/unknown"
+
+USER_AGENT = _get_user_agent()
 
 
 # =============================================================================
@@ -101,6 +109,12 @@ class CloudClient:
             env var, then https://api.flowscript.org.
         batch_size: Flush automatically when buffer reaches this size.
             Default 100.
+        max_buffer_size: Maximum events to buffer before dropping new events.
+            Prevents unbounded memory growth when Cloud is unreachable.
+            Dropped events are still in the local audit trail (AuditWriter
+            writes to disk before calling on_event). Use the backfill
+            endpoint to recover after Cloud connectivity is restored.
+            Default 10000.
         timeout: HTTP request timeout in seconds. Default 30.
         on_witness: Optional callback invoked with each CloudWitness after
             successful flush. Use for logging or monitoring.
@@ -114,9 +128,10 @@ class CloudClient:
         namespace: Optional[str] = None,
         endpoint: Optional[str] = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE,
         timeout: int = 30,
-        on_witness: Optional[callable] = None,
-        on_error: Optional[callable] = None,
+        on_witness: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("FLOWSCRIPT_API_KEY", "")
         self._namespace = namespace or os.environ.get("FLOWSCRIPT_NAMESPACE", "")
@@ -124,6 +139,7 @@ class CloudClient:
             endpoint or os.environ.get("FLOWSCRIPT_CLOUD_URL", DEFAULT_CLOUD_URL)
         ).rstrip("/")
         self._batch_size = batch_size
+        self._max_buffer_size = max_buffer_size
         self._timeout = timeout
         self._on_witness = on_witness
         self._on_error = on_error
@@ -131,6 +147,7 @@ class CloudClient:
         self._lock = threading.Lock()
         self._total_sent = 0
         self._total_accepted = 0
+        self._total_dropped = 0
         self._last_witness: Optional[CloudWitness] = None
 
         if not self._api_key:
@@ -160,6 +177,16 @@ class CloudClient:
         return self._total_accepted
 
     @property
+    def total_dropped(self) -> int:
+        """Total events dropped due to buffer overflow.
+
+        Dropped events are NOT lost — they exist in the local audit trail
+        (AuditWriter writes to disk before calling on_event). Use the
+        backfill endpoint to sync them to Cloud after connectivity is restored.
+        """
+        return self._total_dropped
+
+    @property
     def last_witness(self) -> Optional[CloudWitness]:
         """Most recent witness attestation received."""
         return self._last_witness
@@ -175,6 +202,10 @@ class CloudClient:
         The entry dict is re-serialized to canonical JSON (matching the
         AuditWriter's serialization) for hash-chain-compatible transmission.
 
+        If the buffer has reached max_buffer_size, the event is dropped with
+        a warning to stderr. Dropped events are NOT lost — they exist in the
+        local audit trail. Use the backfill endpoint to recover.
+
         Args:
             entry: Audit event dict as produced by AuditWriter.write()
         """
@@ -182,10 +213,28 @@ class CloudClient:
         # Python json.dumps with sort_keys=True is deterministic for the same dict.
         json_line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
 
+        batch_to_send = None
         with self._lock:
+            if len(self._buffer) >= self._max_buffer_size:
+                self._total_dropped += 1
+                if self._total_dropped == 1 or self._total_dropped % 1000 == 0:
+                    print(
+                        f"CloudClient: buffer full ({self._max_buffer_size} events). "
+                        f"Dropping Cloud sync ({self._total_dropped} dropped total). "
+                        f"Local audit trail is unaffected. Use backfill to recover.",
+                        file=sys.stderr,
+                    )
+                return
+
             self._buffer.append(json_line)
             if len(self._buffer) >= self._batch_size:
-                self._flush_locked()
+                batch_to_send = list(self._buffer)
+                self._buffer.clear()
+
+        # Auto-flush outside the lock — same pattern as flush() to avoid
+        # blocking other queue_event() callers during HTTP I/O.
+        if batch_to_send is not None:
+            self._send_batch(batch_to_send)
 
     def flush(self) -> Optional[CloudFlushResult]:
         """Send all buffered events to Cloud.
@@ -195,18 +244,22 @@ class CloudClient:
 
         Safe to call from any thread, including atexit handlers.
         """
+        # Take events from buffer under lock, then release lock for HTTP I/O.
+        # This allows other threads to queue_event() while we're sending.
         with self._lock:
-            return self._flush_locked()
+            if not self._buffer:
+                return None
+            events = list(self._buffer)
+            self._buffer.clear()
 
-    def _flush_locked(self) -> Optional[CloudFlushResult]:
-        """Internal flush — must be called with self._lock held."""
-        if not self._buffer:
-            return None
+        return self._send_batch(events)
 
-        events = list(self._buffer)
-        self._buffer.clear()
+    def _send_batch(self, events: list[str]) -> CloudFlushResult:
+        """Send a batch of canonical JSON event strings to Cloud.
 
-        # Build request body
+        Handles response parsing, witness tracking, error handling, and retry
+        (putting events back in buffer on 5xx/network errors).
+        """
         body = json.dumps({
             "namespace": self._namespace,
             "events": events,
@@ -231,18 +284,27 @@ class CloudClient:
                 accepted = resp_body.get("accepted", 0)
                 self._total_accepted += accepted
 
-                # Parse witness
+                # Parse witness — defensive against malformed responses.
+                # Events are already accepted; witness parse failure should not
+                # cause data loss or propagate errors.
                 witness_data = resp_body.get("witness")
                 witness = None
                 if witness_data:
-                    witness = CloudWitness(
-                        id=witness_data["id"],
-                        chain_head_seq=witness_data["chain_head_seq"],
-                        chain_head_hash=witness_data["chain_head_hash"],
-                        witnessed_at=witness_data["witnessed_at"],
-                    )
-                    self._last_witness = witness
-                    if self._on_witness:
+                    try:
+                        witness = CloudWitness(
+                            id=witness_data["id"],
+                            chain_head_seq=witness_data["chain_head_seq"],
+                            chain_head_hash=witness_data["chain_head_hash"],
+                            witnessed_at=witness_data["witnessed_at"],
+                        )
+                        self._last_witness = witness
+                    except (KeyError, TypeError) as e:
+                        print(
+                            f"CloudClient: malformed witness response: {e}",
+                            file=sys.stderr,
+                        )
+
+                    if witness and self._on_witness:
                         try:
                             self._on_witness(witness)
                         except Exception as e:
@@ -274,14 +336,16 @@ class CloudClient:
             # that needs human attention. On 4xx, also don't retry (client error).
             # On 5xx, put events back in buffer for retry.
             if e.code >= 500:
-                self._buffer = events + self._buffer  # prepend for order preservation
+                with self._lock:
+                    self._buffer = events + self._buffer
 
             self._handle_error(result)
             return result
 
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             # Network error — put events back for retry
-            self._buffer = events + self._buffer
+            with self._lock:
+                self._buffer = events + self._buffer
             result = CloudFlushResult(
                 accepted=0,
                 error=f"Network error: {e}",
@@ -311,10 +375,12 @@ class CloudClient:
 
         Useful for backfill or one-shot uploads.
         """
-        for entry in entries:
-            json_line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-            with self._lock:
-                self._buffer.append(json_line)
+        json_lines = [
+            json.dumps(entry, sort_keys=True, separators=(",", ":"))
+            for entry in entries
+        ]
+        with self._lock:
+            self._buffer.extend(json_lines)
         return self.flush() or CloudFlushResult(accepted=0)
 
     def health(self) -> dict[str, Any]:
