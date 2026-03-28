@@ -6,9 +6,11 @@
 
 <p align="center"><strong>Your AI agents make decisions they can't explain. FlowScript makes those decisions queryable.</strong></p>
 
-<p align="center">Drop-in adapters for 9 agent frameworks. Plain text in, typed reasoning queries out.<br>Hash-chained audit trail. Structural compliance. MIT licensed.</p>
+<p align="center">Drop-in adapters for 9 agent frameworks. Plain text in, typed reasoning queries out.<br>Hash-chained audit trail. Convergence certificates. CloudClient for independent witnessing. MIT licensed.</p>
 
-[![Tests](https://img.shields.io/badge/tests-584%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
+<p align="center"><em>EU AI Act enforcement begins August 2026. Audit trails can't be backdated.<br>FlowScript is the compliance engine that makes your agents audit-ready from day one.</em></p>
+
+[![Tests](https://img.shields.io/badge/tests-586%20passing-brightgreen)](https://github.com/phillipclapham/flowscript-agents) [![PyPI](https://img.shields.io/pypi/v/flowscript-agents)](https://pypi.org/project/flowscript-agents/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/flowscript-agents/)
 
 ---
 
@@ -293,6 +295,67 @@ Events are dispatched in order (single worker thread). Callback failures log to 
 
 ---
 
+## @fix — Convergence Certificates
+
+When FlowScript's consolidation engine resolves contradictions — creating tensions, updating beliefs, unblocking decisions — it produces **convergence certificates**: hash-chained attestations that prove how the reasoning graph changed and that the transformation hasn't been tampered with.
+
+```python
+from flowscript_agents import Memory, MemoryOptions, AuditConfig
+
+mem = Memory.load_or_create("agent.json", options=MemoryOptions(
+    audit=AuditConfig(retention_months=84)
+))
+
+# UnifiedMemory consolidation produces certificates automatically:
+# initial_graph_hash → delta_sequence → final_graph_hash → certificate_hash
+```
+
+Each certificate records: the graph state before consolidation (`initial_hash`), what changed (`delta_sequence`), the graph state after (`final_hash`), and a hash proving the record is tamper-evident (`certificate_hash`). This is concrete Article 86 infrastructure — an auditor can verify not just what your agent decided, but how it got there.
+
+**Underlying formal model:** FlowScript's `@fix` operator provides stratified fixpoint computation over typed reasoning graphs — L0 (pure description, always terminates), L1 (bounded fixpoint, Knaster-Tarski guarantees), L2 (general fixpoint, Turing-complete, bounded). Consolidation is a degenerate L1 fixpoint (single iteration). Full spec: [`fixpoint_spec.md`](https://github.com/phillipclapham/flowscript/blob/main/spec/fixpoint_spec.md).
+
+---
+
+## FlowScript Cloud — Independent Cryptographic Witnessing
+
+**[api.flowscript.org](https://api.flowscript.org)** — your agent's audit trail, independently witnessed.
+
+Local audit trails are tamper-evident but self-attested. FlowScript Cloud adds independent verification: your SDK streams events to the Cloud service, which verifies chain continuity and stores witness attestations.
+
+```bash
+# One environment variable
+export FLOWSCRIPT_API_KEY=your-key
+```
+
+```python
+from flowscript_agents import Memory, MemoryOptions, AuditConfig
+from flowscript_agents.cloud import CloudClient
+
+cloud = CloudClient()  # reads FLOWSCRIPT_API_KEY from env
+
+mem = Memory.load_or_create("agent.json", options=MemoryOptions(
+    audit=AuditConfig(on_event=cloud.queue_event)
+))
+
+# Every audit event — including convergence certificates — streams to
+# api.flowscript.org automatically. Chain verification + witness
+# attestation happen server-side. Local audit trail remains your
+# source of truth; Cloud provides independent witness attestation.
+```
+
+**CloudClient features:**
+- **Batch buffering** — events accumulate and flush in batches (configurable `batch_size`, default 50)
+- **Lock-free I/O** — network operations never block your agent's main thread
+- **Buffer overflow protection** — `max_buffer_size` cap prevents memory growth; oldest events shed first (recoverable via backfill)
+- **Witness tracking** — `cloud.last_witness` returns the most recent attestation from the Cloud service
+- **Retry with backoff** — transient failures retry automatically (5xx, network errors)
+
+**Three deployment tiers from one codebase:** SaaS at api.flowscript.org, self-hosted Cloudflare (deploy to your own account), or Docker on-premise for regulated industries. BSL 1.1 licensed.
+
+[FlowScript Cloud repo →](https://github.com/phillipclapham/flowscript-cloud)
+
+---
+
 ## Session Lifecycle — How Memory Gets Smarter
 
 Just like a mind needs sleep to consolidate memories, your agent's reasoning graph needs regular session wraps to develop intelligence over time. Without consolidation cycles, knowledge accumulates as noise instead of maturing.
@@ -433,14 +496,14 @@ text = explain(result, audience="legal")
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
 │  │  Memory   │ │ Queries  │ │ Audit Trail          │ │
 │  │  (graph)  │ │ (5 ops)  │ │ (SHA-256 hash chain) │ │
-│  │         explain()      │ │  on_event_async      │ │
-│  └──────────┘ └──────────┘ └──────────────────────┘ │
+│  │  @fix     │ │explain() │ │  on_event_async ─────────→ FlowScript Cloud
+│  └──────────┘ └──────────┘ └──────────────────────┘ │  (independent witness)
 ├─────────────────────────────────────────────────────┤
 │  Your Storage (files, database, cloud)              │
 └─────────────────────────────────────────────────────┘
 ```
 
-FlowScript doesn't replace your stack. It sits between your agent framework and your storage, adding typed reasoning and audit to whatever you already use.
+FlowScript doesn't replace your stack. It sits between your agent framework and your storage, adding typed reasoning and audit to whatever you already use. Optionally stream audit events to [FlowScript Cloud](https://api.flowscript.org) for independent cryptographic witnessing.
 
 ---
 
@@ -486,11 +549,12 @@ The applications are what you install FlowScript for. The infrastructure is why 
 
 | Package | What | Install |
 |:--------|:-----|:--------|
-| [flowscript-agents](https://pypi.org/project/flowscript-agents/) | Python SDK — 9 adapters, unified memory, consolidation, audit trail | `pip install flowscript-agents openai` |
+| [flowscript-agents](https://pypi.org/project/flowscript-agents/) | Python SDK — 9 adapters, CloudClient, unified memory, consolidation, audit trail | `pip install flowscript-agents openai` |
 | [flowscript-core](https://www.npmjs.com/package/flowscript-core) | TypeScript SDK — Memory class, 15 tools, token budgeting, audit trail | `npm install flowscript-core` |
+| [flowscript-cloud](https://github.com/phillipclapham/flowscript-cloud) | Cloud witnessing service — chain verification, witness attestations, RBAC | [api.flowscript.org](https://api.flowscript.org) |
 | [flowscript.org](https://flowscript.org) | Web editor, D3 visualization, live query panel | Browser |
 
-**1,315 tests** across Python (584) and TypeScript (731). Same audit trail format and canonical JSON serialization across both languages.
+**~1,400+ tests** across Python (586), TypeScript (779), and Cloud (68). Same audit trail format and canonical JSON serialization across both languages.
 
 ### Docs
 
