@@ -27,6 +27,7 @@ Usage:
 """
 
 from .audit import AuditConfig, AuditQueryResult, AuditVerifyResult
+from .cloud import CloudClient, CloudFlushResult, CloudWitness
 from .memory import (
     Memory,
     MemoryOptions,
@@ -44,12 +45,15 @@ from .memory import (
 from .unified import UnifiedMemory
 from .explain import explain
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 __all__ = [
     "explain",
     "AuditConfig",
     "AuditQueryResult",
     "AuditVerifyResult",
+    "CloudClient",
+    "CloudFlushResult",
+    "CloudWitness",
     "Memory",
     "MemoryOptions",
     "NodeRef",
