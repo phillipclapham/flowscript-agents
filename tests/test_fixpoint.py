@@ -421,3 +421,251 @@ class TestConsolidationFixpoint:
         assert cert["constraint"] == "L1"
         # Novel = 1 ADD, delta = [1, 0]
         assert cert["delta_sequence"][0] >= 0  # at least 0 (could be 1 for novel ADD)
+
+
+# =============================================================================
+# Certificate semantic consistency tests
+# =============================================================================
+
+
+class TestCertificateSemanticConsistency:
+    """Test that certificate fields tell a COHERENT story.
+
+    These tests verify the MEANING of certificates, not just their structure.
+    A certificate's delta_sequence, initial_graph_hash, and final_graph_hash
+    must be internally consistent:
+    - If delta > 0, the graph should have changed (hashes differ)
+    - If delta == 0 for all iterations, the graph should be unchanged (hashes equal)
+    - The hash transition must reflect the actual consolidation effect
+    """
+
+    def test_update_consolidation_hashes_differ_with_positive_delta(self, tmp_path):
+        """UPDATE consolidation: graph changes, delta > 0, hashes MUST differ."""
+        memory = create_memory_with_audit(str(tmp_path))
+        embedder = MockEmbedder()
+        index = VectorIndex(memory, embedder)
+
+        # Add existing content that will be UPDATE target
+        ref1 = memory.thought("The user prefers dark mode")
+        index.index_node(ref1.id)
+
+        # Mock provider returns UPDATE action
+        provider = MockConsolidationProvider()
+        provider.set_response([{
+            "name": "update_memory",
+            "arguments": {
+                "new_node_index": 0,
+                "target_candidate_index": 0,
+                "merged_content": "The user strongly prefers dark mode in all apps",
+                "reasoning": "More specific version of same preference",
+            },
+        }])
+
+        engine = ConsolidationEngine(
+            memory, provider=provider, vector_index=index,
+            candidate_threshold=0.01,
+        )
+
+        extract = AutoExtract(
+            memory,
+            llm=lambda text: json.dumps({
+                "nodes": [{"type": "thought", "content": "The user strongly prefers dark mode"}],
+                "relationships": [],
+                "states": [],
+            }),
+            vector_index=index,
+            consolidation_engine=engine,
+        )
+
+        extract.ingest("The user strongly prefers dark mode")
+
+        events = read_audit_events(memory)
+        end_event = next(e for e in events if e["event"] == "fixpoint_end")
+        cert = end_event["data"]
+
+        # Semantic consistency: UPDATE changes the graph
+        assert cert["delta_sequence"][0] > 0, (
+            "UPDATE consolidation should report positive delta"
+        )
+        assert cert["initial_graph_hash"] != cert["final_graph_hash"], (
+            "UPDATE consolidation changes graph content — hashes MUST differ. "
+            "If equal, the certificate claims changes occurred but graph is unchanged."
+        )
+        assert cert["graph_hash_valid"] is True
+
+    def test_novel_consolidation_hashes_differ_with_positive_delta(self, tmp_path):
+        """All-novel (ADD) consolidation: new nodes added, hashes MUST differ.
+
+        This is the bug that survived two 3-layer reviews (Mar 28):
+        When pre_hash was captured AFTER node creation, ADD actions produced
+        initial_hash == final_hash because the nodes were already in memory.
+        With pre_hash captured BEFORE node creation, the hash transition
+        correctly reflects "graph grew by N novel nodes."
+        """
+        memory = create_memory_with_audit(str(tmp_path))
+        embedder = MockEmbedder()
+        index = VectorIndex(memory, embedder)
+
+        provider = MockConsolidationProvider()
+        engine = ConsolidationEngine(
+            memory, provider=provider, vector_index=index,
+        )
+
+        extract = AutoExtract(
+            memory,
+            llm=lambda text: json.dumps({
+                "nodes": [
+                    {"type": "thought", "content": "Something completely new"},
+                    {"type": "observation", "content": "Another novel observation"},
+                ],
+                "relationships": [],
+                "states": [],
+            }),
+            vector_index=index,
+            consolidation_engine=engine,
+        )
+
+        extract.ingest("Something completely new and another novel observation")
+
+        events = read_audit_events(memory)
+        end_event = next(e for e in events if e["event"] == "fixpoint_end")
+        cert = end_event["data"]
+
+        # Semantic consistency: novel nodes ADD to the graph
+        assert cert["delta_sequence"][0] > 0, (
+            "Novel consolidation should report positive delta (ADD actions)"
+        )
+        assert cert["initial_graph_hash"] != cert["final_graph_hash"], (
+            "Novel consolidation adds nodes — hashes MUST differ. "
+            "If equal, the certificate contradicts itself: delta says changes "
+            "occurred but graph state is unchanged."
+        )
+        assert cert["graph_hash_valid"] is True
+
+    def test_duplicate_consolidation_hashes_equal_with_zero_delta(self, tmp_path):
+        """All-duplicate (NONE) consolidation: no net change, hashes MUST be equal.
+
+        When every extracted node is a semantic duplicate of existing content,
+        consolidation creates then removes the new node (NONE action). The net
+        effect on the graph is zero — hashes should be equal and delta should
+        reflect no constructive changes.
+
+        Note: extracted content must DIFFER from existing (otherwise _add_node
+        deduplicates by content-hash and no new node is created). We use
+        semantically equivalent but textually different content so the mock
+        embedder produces similar vectors while creating distinct node IDs.
+        """
+        memory = create_memory_with_audit(str(tmp_path))
+        embedder = MockEmbedder()
+        index = VectorIndex(memory, embedder)
+
+        # Add existing content
+        ref1 = memory.thought("The user prefers dark mode for their editor")
+        index.index_node(ref1.id)
+
+        # Mock provider returns NONE (skip_duplicate) action
+        provider = MockConsolidationProvider()
+        provider.set_response([{
+            "name": "skip_duplicate",
+            "arguments": {
+                "new_node_index": 0,
+                "target_candidate_index": 0,
+                "reasoning": "Already captured by existing node",
+            },
+        }])
+
+        engine = ConsolidationEngine(
+            memory, provider=provider, vector_index=index,
+            candidate_threshold=0.01,  # Low threshold — mock embeddings will match on shared words
+        )
+
+        # Different text, same meaning — creates a distinct node ID
+        extract = AutoExtract(
+            memory,
+            llm=lambda text: json.dumps({
+                "nodes": [{"type": "thought", "content": "The user likes dark mode in their editor"}],
+                "relationships": [],
+                "states": [],
+            }),
+            vector_index=index,
+            consolidation_engine=engine,
+        )
+
+        extract.ingest("The user likes dark mode in their editor")
+
+        events = read_audit_events(memory)
+        end_event = next(e for e in events if e["event"] == "fixpoint_end")
+        cert = end_event["data"]
+
+        # Semantic consistency: NONE = no net change to graph
+        # Node was created (different content → different ID), then removed
+        assert cert["delta_sequence"][0] == 0, (
+            "All-duplicate consolidation should report zero delta "
+            f"(NONE actions don't add value). Got: {cert['delta_sequence']}"
+        )
+        assert cert["initial_graph_hash"] == cert["final_graph_hash"], (
+            "All-duplicate consolidation has zero net effect — hashes MUST be equal. "
+            "If different, the certificate claims nothing changed but graph state shifted."
+        )
+        assert cert["graph_hash_valid"] is True
+
+    def test_certificate_hash_captures_semantic_fields(self, tmp_path):
+        """Certificate hash changes when any semantic field differs."""
+        r1 = FixpointResult(
+            name="test", constraint="L1", status="converged",
+            iterations=2, delta_sequence=[3, 0],
+            initial_graph_hash="aaa", final_graph_hash="bbb",
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        r2 = FixpointResult(
+            name="test", constraint="L1", status="converged",
+            iterations=2, delta_sequence=[3, 0],
+            initial_graph_hash="aaa", final_graph_hash="ccc",  # different final hash
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        assert r1.certificate_hash != r2.certificate_hash, (
+            "Different graph hashes should produce different certificate hashes"
+        )
+
+    def test_pre_hash_captured_before_node_creation(self, tmp_path):
+        """Verify the fix: pre_hash reflects graph state BEFORE extraction.
+
+        Directly tests the fix by checking that the initial_graph_hash in the
+        certificate matches the empty graph (when starting from empty memory),
+        NOT the graph-with-extracted-nodes.
+        """
+        memory = create_memory_with_audit(str(tmp_path))
+        embedder = MockEmbedder()
+        index = VectorIndex(memory, embedder)
+
+        # Compute hash of empty graph for comparison
+        empty_hash = FixpointContext._compute_graph_hash_static(memory)
+
+        provider = MockConsolidationProvider()
+        engine = ConsolidationEngine(
+            memory, provider=provider, vector_index=index,
+        )
+
+        extract = AutoExtract(
+            memory,
+            llm=lambda text: json.dumps({
+                "nodes": [{"type": "thought", "content": "New thought"}],
+                "relationships": [],
+                "states": [],
+            }),
+            vector_index=index,
+            consolidation_engine=engine,
+        )
+
+        extract.ingest("New thought")
+
+        events = read_audit_events(memory)
+        end_event = next(e for e in events if e["event"] == "fixpoint_end")
+        cert = end_event["data"]
+
+        # The initial_graph_hash should match the empty graph hash,
+        # NOT the hash after node creation
+        assert cert["initial_graph_hash"] == empty_hash, (
+            "initial_graph_hash should reflect graph BEFORE extraction, "
+            "not after node creation. This is the core fix."
+        )

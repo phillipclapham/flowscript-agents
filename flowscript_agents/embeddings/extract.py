@@ -611,6 +611,18 @@ class AutoExtract:
         4. Create extraction relationships for surviving nodes
         5. Apply extraction states for surviving nodes
         """
+        # Capture pre-extraction graph hash for attestation.
+        # MUST be before node creation — the certificate's initial_graph_hash
+        # must represent the graph BEFORE any extraction/consolidation work.
+        # Otherwise ADD actions (novel nodes already in memory from step 1)
+        # produce initial_hash == final_hash, contradicting delta > 0.
+        pre_hash = None
+        try:
+            from ..fixpoint import FixpointContext
+            pre_hash = FixpointContext._compute_graph_hash_static(self._memory)
+        except Exception:
+            pass  # Attestation is optional — consolidation always runs
+
         # Create all nodes and embed them
         node_refs: list[NodeRef | None] = []
         extracted_node_dicts: list[dict[str, Any]] = []
@@ -623,14 +635,6 @@ class AutoExtract:
                 "type": extracted_node.type,
                 "content": extracted_node.content,
             })
-
-        # Capture pre-consolidation graph hash for attestation
-        pre_hash = None
-        try:
-            from ..fixpoint import FixpointContext
-            pre_hash = FixpointContext._compute_graph_hash_static(self._memory)
-        except Exception:
-            pass  # Attestation is optional — consolidation always runs
 
         # Run consolidation (always runs — this is the core operation)
         consolidation_result = self._consolidation_engine.consolidate(

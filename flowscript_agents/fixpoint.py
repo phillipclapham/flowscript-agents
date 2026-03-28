@@ -25,10 +25,13 @@ for L1 computations where deterministic replay is possible.
 Usage:
     from flowscript_agents.fixpoint import FixpointContext
 
-    # Run computation first, then wrap with certificate
+    # Capture graph state BEFORE computation, then wrap AFTER
+    pre_hash = FixpointContext._compute_graph_hash_static(memory)
     result = engine.consolidate(nodes, refs)
-    ctx = FixpointContext.attest(memory, name="consolidation", constraint="L1",
-                                 delta_sequence=[delta, 0])
+    with FixpointContext(memory, name="consolidation", constraint="L1",
+                         _pre_hash=pre_hash) as ctx:
+        ctx.record_iteration(delta)
+        ctx.record_iteration(0)  # convergence marker
     certificate = ctx.result
 """
 
