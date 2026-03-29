@@ -27,6 +27,7 @@ Usage:
 """
 
 from .audit import AuditConfig, AuditQueryResult, AuditVerifyResult
+from .client import FlowScriptAnthropic, FlowScriptOpenAI
 from .cloud import CloudClient, CloudFlushResult, CloudWitness
 from .memory import (
     Memory,
@@ -51,6 +52,8 @@ __all__ = [
     "AuditConfig",
     "AuditQueryResult",
     "AuditVerifyResult",
+    "FlowScriptAnthropic",
+    "FlowScriptOpenAI",
     "CloudClient",
     "CloudFlushResult",
     "CloudWitness",
