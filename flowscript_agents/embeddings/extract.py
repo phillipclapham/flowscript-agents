@@ -102,7 +102,9 @@ Given text from an AI agent conversation or human input, extract the reasoning s
 
 ## Node Types
 - thought: An observation, fact, preference, or idea
-- decision: A choice that was made (include rationale in state)
+- decision: A choice, recommendation, or selection that was made (include rationale in state).
+  Use this for: explicit choices ("we chose X"), recommendations ("I recommend X"),
+  selections ("selected X"), and final answers to evaluation questions.
 - question: Something being explored or evaluated
 - insight: A deeper understanding, pattern, or lesson learned
 - action: Something to be done or that was done
@@ -184,11 +186,15 @@ _ACTOR_SUFFIX = {
     "agent": (
         "\n## Actor Context\n"
         "This text is from an AI AGENT. Prioritize extracting:\n"
-        "- Analysis and observations (these are tentative)\n"
+        "- Final recommendations and selections as type 'decision' with 'decided' state\n"
+        "- Analysis and observations as 'thought' or 'insight'\n"
         "- Proposed alternatives and their trade-offs\n"
         "- Status updates and progress markers\n"
         "- Identified risks and tensions\n"
-        "Weight agent observations as medium-confidence (may be revised).\n\n"
+        "IMPORTANT: When the agent makes a recommendation, selects an option, or gives\n"
+        "a final answer, use type 'decision' (not 'thought') and add a 'decided' state.\n"
+        "Weight agent observations as medium-confidence (may be revised), but treat\n"
+        "explicit recommendations as decisions.\n\n"
     ),
 }
 
@@ -479,7 +485,13 @@ class AutoExtract:
         # Step 1: LLM extraction with retry
         # Build actor-aware prompt
         actor_suffix = _ACTOR_SUFFIX.get(actor, "") if actor else ""
-        prompt = EXTRACTION_PROMPT_BASE + actor_suffix + "\n## Text to extract from:\n" + text
+        # XML delimiters prevent LLMs from interpreting "User:"/"Assistant:" as
+        # conversation roles — the text is DATA to analyze, not a chat to continue.
+        prompt = (
+            EXTRACTION_PROMPT_BASE + actor_suffix
+            + "\n## Text to extract from:\n"
+            + "<document>\n" + text + "\n</document>"
+        )
 
         # Non-retryable errors: programming bugs, auth failures, validation.
         _NO_RETRY = (TypeError, ValueError, KeyError, AttributeError)
@@ -873,21 +885,24 @@ class AutoExtract:
     def _get_node_creator(self, type_str: str) -> Callable[[str], NodeRef]:
         """Get the Memory node creation method for a type string.
 
-        Note: 'alternative' maps to _add_node with ALTERNATIVE type directly
-        (not memory.alternative() which requires a question ref). The ALTERNATIVE
-        relationship is created separately in Step 4 via memory.relate().
-        'decision' and 'blocker' use thought() because they're semantically
-        thoughts with decided/blocked states applied in Step 5.
+        Note: 'alternative', 'decision', and 'blocker' use _add_node directly
+        to create nodes with their proper NodeType. The ALTERNATIVE relationship
+        is created separately in Step 4 via memory.relate(). States (decided,
+        blocked) are applied in Step 5 via _apply_extraction_states().
         """
         creators: dict[str, Callable[[str], NodeRef]] = {
             "thought": self._memory.thought,
             "statement": self._memory.statement,
             "question": self._memory.question,
-            "decision": self._memory.thought,  # decisions are thoughts with decided state
+            "decision": lambda content: self._memory._add_node(
+                content, NodeType.DECISION
+            ),
             "insight": self._memory.insight,
             "action": self._memory.action,
             "completion": self._memory.completion,
-            "blocker": self._memory.thought,  # blockers are thoughts with blocked state
+            "blocker": lambda content: self._memory._add_node(
+                content, NodeType.BLOCKER
+            ),
             "alternative": lambda content: self._memory._add_node(
                 content, NodeType.ALTERNATIVE
             ),

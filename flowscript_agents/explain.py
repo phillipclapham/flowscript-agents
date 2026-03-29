@@ -16,6 +16,7 @@ Key properties:
   - No LLM dependency: runs offline, suitable for compliance artifacts
   - Multiple audience modes: general, legal, technical
   - Supports all why() return formats: chain, minimal, tree
+  - Counterfactual explanations via explain_counterfactual() (CJEU C-203/22)
 
 Usage:
     from flowscript_agents import Memory
@@ -40,7 +41,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Union
 
-from .query import CausalAncestry, CausalTree, CausalTreeNode, MinimalWhy
+from .query import (
+    CausalAncestry, CausalTree, CausalTreeNode, CounterfactualResult, MinimalWhy,
+)
 
 
 # Public type alias — all why() return types
@@ -408,3 +411,134 @@ def _humanize_relationship(rel_type: str | None) -> str:
     if rel_type is None:
         return "which follows from"
     return mapping.get(rel_type, f"({rel_type})")
+
+
+# =============================================================================
+# Counterfactual Explanation (CJEU C-203/22)
+# =============================================================================
+
+
+def explain_counterfactual(
+    result: CounterfactualResult,
+    subject: str | None = None,
+    audience: str = AUDIENCE_GENERAL,
+) -> str:
+    """Convert a counterfactual() result into a human-readable explanation.
+
+    Satisfies CJEU C-203/22: not just "why this" but "why not that" — what
+    conditions, if different, would lead to a different outcome.
+
+    Args:
+        result: Output from ``Memory.query.counterfactual()``.
+        subject: Optional label for the affected person (e.g. "Elena Petrova").
+        audience: "general", "legal", or "technical".
+
+    Returns:
+        Human-readable counterfactual explanation.
+    """
+    if audience not in (AUDIENCE_GENERAL, AUDIENCE_LEGAL, AUDIENCE_TECHNICAL):
+        raise ValueError(
+            f"audience must be 'general', 'legal', or 'technical', got {audience!r}"
+        )
+
+    if audience == AUDIENCE_TECHNICAL:
+        return str(result)
+
+    decision = result.decision["content"]
+    factors = result.factors
+
+    if audience == AUDIENCE_LEGAL:
+        return _counterfactual_legal(decision, factors, subject)
+    return _counterfactual_general(decision, factors)
+
+
+def _counterfactual_general(
+    decision: str,
+    factors: list,
+) -> str:
+    lines = ["Counterfactual Explanation", ""]
+    lines.append(f'The decision "{decision}" was reached based on specific conditions.')
+    lines.append(
+        "The following factors were pivotal — if any had been different, "
+        "the outcome could have changed:"
+    )
+    lines.append("")
+
+    if not factors:
+        lines.append(
+            "No pivotal factors were identified in the reasoning chain. "
+            "The decision may have been reached without competing considerations."
+        )
+        return "\n".join(lines)
+
+    for i, f in enumerate(factors, 1):
+        lines.append(f"  {i}. {f.factor['content']}")
+        lines.append(f"     Tension: {f.tension_axis}")
+        lines.append(f"     If instead: {f.counterfactual_condition['content']}")
+        lines.append("")
+
+    lines.append(
+        f"In total, {len(factors)} pivotal factor{'s were' if len(factors) != 1 else ' was'} "
+        f"identified across {factors[0].depth if factors else 0} levels of reasoning."
+    )
+    return "\n".join(lines)
+
+
+def _counterfactual_legal(
+    decision: str,
+    factors: list,
+    subject: str | None,
+) -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    lines = ["COUNTERFACTUAL ANALYSIS — AUTOMATED DECISION", ""]
+
+    if subject:
+        lines.append(f"Subject: {subject}")
+    lines.append(f"Decision under analysis: {decision}")
+    lines.append(f"Generated: {now}")
+    lines.append(
+        "Basis: CJEU Case C-203/22 (counterfactual explanation requirement)"
+    )
+    lines.append("")
+
+    lines.append("PIVOTAL FACTORS")
+    lines.append("")
+
+    if not factors:
+        lines.append(
+            "No counterfactual factors identified. The decision chain contains "
+            "no recorded competing considerations that would alter the outcome."
+        )
+        return "\n".join(lines)
+
+    lines.append(
+        "The following factors were identified as pivotal to the decision. "
+        "Each represents a point where different conditions would have led "
+        "to a different outcome:"
+    )
+    lines.append("")
+
+    for i, f in enumerate(factors, 1):
+        lines.append(f"  Factor {i} (reasoning depth {f.depth}):")
+        lines.append(f"    Determining condition: {f.factor['content']}")
+        lines.append(f"    Dimension of competition: {f.tension_axis}")
+        lines.append(f"    Counterfactual condition: {f.counterfactual_condition['content']}")
+        lines.append(
+            f"    Implication: Had the counterfactual condition prevailed over "
+            f"the determining condition on the axis of \"{f.tension_axis}\", "
+            f"the decision would likely differ."
+        )
+        lines.append("")
+
+    lines.append("CERTIFICATION")
+    lines.append("")
+    lines.append(
+        f"This counterfactual analysis was computed deterministically from the "
+        f"agent's recorded reasoning chain. {len(factors)} pivotal "
+        f"factor{'s were' if len(factors) != 1 else ' was'} identified across "
+        f"{max(f.depth for f in factors)} levels of causal reasoning. "
+        f"No large language model was used in generating this explanation."
+    )
+
+    return "\n".join(lines)

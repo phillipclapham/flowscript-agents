@@ -1,8 +1,8 @@
 """
 FlowScript Query Engine.
 
-Inlined from flowscript-ldp v0.2.1. Five computational operations
-on IR graphs: why, what_if, tensions, blocked, alternatives.
+Six computational operations on IR graphs:
+why, what_if, tensions, blocked, alternatives, counterfactual.
 """
 
 from __future__ import annotations
@@ -259,6 +259,41 @@ class AlternativesResultTree:
 AlternativesResult = (
     AlternativesResultComparison | AlternativesResultTree | AlternativesResultSimple
 )
+
+
+@dataclass
+class CounterfactualFactor:
+    """A pivotal factor in the causal chain whose change would alter the decision."""
+
+    factor: dict[str, str]  # {"id": "...", "content": "..."} — the tension-bearing ancestor
+    counterfactual_condition: dict[str, str]  # {"id": "...", "content": "..."} — the other side of the tension
+    tension_axis: str  # What dimension they compete on
+    depth: int  # Distance from decision (deeper = more fundamental)
+    relationship_type: str  # How this factor connects to the chain
+
+    def __repr__(self) -> str:
+        return (
+            f"CounterfactualFactor(depth={self.depth}, "
+            f"axis={self.tension_axis!r}, "
+            f"factor={self.factor['content'][:50]!r})"
+        )
+
+
+@dataclass
+class CounterfactualResult:
+    """Result of counterfactual analysis: what would need to change for a different outcome."""
+
+    decision: dict[str, str]  # {"id": "...", "content": "..."} — the decision being analyzed
+    factors: list[CounterfactualFactor]  # Pivotal factors, deepest first
+    causal_chain_depth: int  # Depth of the why() chain analyzed
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        n = len(self.factors)
+        return (
+            f"CounterfactualResult({n} pivotal factor{'s' if n != 1 else ''}, "
+            f"chain_depth={self.causal_chain_depth})"
+        )
 
 
 # Internal traversal result
@@ -855,6 +890,116 @@ class QueryEngine:
             )
 
         return tree_node
+
+    # =========================================================================
+    # Query 6: counterfactual -- What would need to change? (CJEU C-203/22)
+    # =========================================================================
+
+    def counterfactual(
+        self,
+        node_id: str,
+        *,
+        max_depth: Optional[int] = None,
+    ) -> CounterfactualResult:
+        """Identify what would need to change for a different decision outcome.
+
+        Satisfies CJEU C-203/22 requirement for counterfactual explanations:
+        not just "why this" but "why not that" — what conditions, if different,
+        would have led to a different outcome.
+
+        Algorithm:
+        1. Walk backward from the decision via why() to get the causal chain
+        2. For each ancestor in the chain, find tension relationships
+        3. Each tension-bearing ancestor is a "pivotal factor" — a node where
+           the reasoning could have gone differently
+        4. The other side of the tension is the counterfactual condition
+        5. Rank deepest-first (more fundamental = broader impact if changed)
+
+        Deterministic, no LLM — pure graph traversal.
+
+        Args:
+            node_id: ID of the decision node to analyze.
+            max_depth: Maximum chain depth to traverse. None = unlimited.
+
+        Returns:
+            CounterfactualResult with pivotal factors ordered deepest-first.
+        """
+        assert self._ir is not None
+
+        target_node = self._node_map.get(node_id)
+        if target_node is None:
+            raise ValueError(f"Node not found: {node_id}")
+
+        # Step 1: Get causal ancestors via backward traversal
+        rel_types = [RelationType.DERIVES_FROM, RelationType.CAUSES]
+        ancestors = self._traverse_backward(node_id, rel_types, max_depth)
+
+        # Also check the target node itself for tensions
+        all_chain_nodes = [
+            _TraversalNode(node=target_node, depth=0, relationship_type=None)
+        ] + ancestors
+
+        # Step 2-4: Find tension-bearing ancestors and construct counterfactuals
+        factors: list[CounterfactualFactor] = []
+        seen_axes: set[str] = set()  # dedup by axis to avoid redundant factors
+
+        for trav in all_chain_nodes:
+            # Find all tension relationships involving this node
+            tensions_as_source = [
+                r for r in self._rels_from_source.get(trav.node.id, [])
+                if r.type == RelationType.TENSION
+            ]
+            tensions_as_target = [
+                r for r in self._rels_to_target.get(trav.node.id, [])
+                if r.type == RelationType.TENSION
+            ]
+
+            for rel in tensions_as_source + tensions_as_target:
+                axis = rel.axis_label or ""
+                if not axis:
+                    continue  # tensions without axes don't produce useful counterfactuals
+
+                # Dedup: one factor per unique axis
+                if axis in seen_axes:
+                    continue
+                seen_axes.add(axis)
+
+                # The other side of the tension is the counterfactual condition
+                other_id = rel.target if rel.source == trav.node.id else rel.source
+                other_node = self._node_map.get(other_id)
+                if other_node is None:
+                    continue
+
+                factors.append(CounterfactualFactor(
+                    factor={
+                        "id": trav.node.id,
+                        "content": trav.node.content,
+                    },
+                    counterfactual_condition={
+                        "id": other_node.id,
+                        "content": other_node.content,
+                    },
+                    tension_axis=axis,
+                    depth=trav.depth,
+                    relationship_type=trav.relationship_type or "direct",
+                ))
+
+        # Sort deepest-first (most fundamental factors first)
+        factors.sort(key=lambda f: -f.depth)
+
+        chain_depth = max((a.depth for a in ancestors), default=0)
+
+        return CounterfactualResult(
+            decision={"id": target_node.id, "content": target_node.content},
+            factors=factors,
+            causal_chain_depth=chain_depth,
+            metadata={
+                "total_factors": len(factors),
+                "max_depth_analyzed": chain_depth,
+                "unique_axes": sorted(seen_axes),
+                "ancestors_analyzed": len(ancestors),
+            },
+        )
 
     def _traverse_backward(
         self,

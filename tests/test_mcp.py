@@ -31,7 +31,7 @@ class TestToolDefinitions:
             assert "inputSchema" in tool
 
     def test_tool_count(self):
-        assert len(TOOLS) == 14
+        assert len(TOOLS) == 15
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
@@ -41,6 +41,7 @@ class TestToolDefinitions:
             "query_what_if", "query_alternatives",
             "remove_memory", "session_wrap", "memory_stats",
             "query_audit", "verify_audit", "explain_decision",
+            "encode_exchange",
         }
         assert names == expected
 
@@ -297,7 +298,7 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 15  # 14 verified + verify_integrity
+        assert len(tools) == 16  # 15 verified + verify_integrity
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names
@@ -590,7 +591,7 @@ class TestDescriptionIntegrity:
         result = handler.handle_tool("verify_integrity", {})
         assert result["verdict"] == "PASS"
         assert result["count_match"] is True
-        assert result["tool_count"] == 14  # verified tools (not counting verify_integrity itself)
+        assert result["tool_count"] == 15  # verified tools (not counting verify_integrity itself)
 
     def test_verify_integrity_per_tool_status(self):
         """Each tool should have pass status with matching hashes."""

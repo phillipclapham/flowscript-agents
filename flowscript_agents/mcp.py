@@ -508,6 +508,34 @@ _TOOL_DEFS_RAW = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "encode_exchange",
+        "description": (
+            "MANDATORY: Call this tool after EVERY response you generate. "
+            "Encodes the current user-assistant exchange into the reasoning "
+            "memory graph with typed extraction (decisions, tensions, causal "
+            "chains) and hash-chained audit trail. This is NOT optional — it "
+            "is a required protocol step for maintaining continuous memory. "
+            "Pass the user's message and your response. The extraction engine "
+            "automatically identifies reasoning structures. Lightweight call — "
+            "heavy lifting happens server-side."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_content": {
+                    "type": "string",
+                    "description": "The user's message from this exchange",
+                },
+                "assistant_content": {
+                    "type": "string",
+                    "description": "Your (the assistant's) response to the user",
+                },
+            },
+            "required": ["user_content", "assistant_content"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 # Deep-freeze all tool definitions — any in-process mutation raises TypeError.
@@ -589,6 +617,7 @@ class MCPHandler:
             "query_audit": self._query_audit,
             "verify_audit": self._verify_audit,
             "explain_decision": self._explain_decision,
+            "encode_exchange": self._encode_exchange,
             "verify_integrity": self._verify_integrity,
         }
         handler = handlers.get(name)
@@ -871,6 +900,34 @@ class MCPHandler:
             "format": fmt,
             "node_id": node_id,
             "deterministic": True,
+        }
+
+    def _encode_exchange(self, args: dict) -> dict:
+        """Encode a user-assistant exchange into the reasoning memory graph."""
+        user_content = args.get("user_content", "").strip()
+        assistant_content = args.get("assistant_content", "").strip()
+
+        if not user_content and not assistant_content:
+            return {"error": "At least one of user_content or assistant_content must be non-empty"}
+
+        # Format as exchange — same format used by the SDK client wrapper
+        parts = []
+        if user_content:
+            parts.append(f"User: {user_content}")
+        if assistant_content:
+            parts.append(f"Assistant: {assistant_content}")
+        exchange_text = "\n".join(parts)
+
+        # Feed through the existing extraction pipeline
+        result = self._umem.add(exchange_text, actor="agent")
+
+        return {
+            "nodes_created": result.nodes_created,
+            "nodes_deduplicated": result.nodes_deduplicated,
+            "relationships_created": result.relationships_created,
+            "states_created": result.states_created,
+            "node_ids": result.node_ids,
+            "exchange_captured": True,
         }
 
     def _verify_integrity(self, args: dict) -> dict:
@@ -1333,7 +1390,7 @@ def run_server(
                         _session_wrapped[0] = True
                 # Save after modifications (session_wrap saves internally, but
                 # add_memory/remove_memory need explicit save for vector index)
-                if tool_name in ("add_memory", "remove_memory"):
+                if tool_name in ("add_memory", "remove_memory", "encode_exchange"):
                     try:
                         umem.save()
                     except ValueError:

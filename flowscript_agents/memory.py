@@ -1492,6 +1492,13 @@ class _QueryProxy:
                 for a in result.alternatives:
                     if hasattr(a, "id"):
                         ids.append(a.id)
+        elif query_type == "counterfactual":
+            if hasattr(result, "decision"):
+                ids.append(result.decision.get("id", ""))
+            if hasattr(result, "factors"):
+                for f in result.factors:
+                    ids.append(f.factor.get("id", ""))
+                    ids.append(f.counterfactual_condition.get("id", ""))
 
         # Filter empty strings and touch
         valid_ids = [i for i in ids if i]
@@ -1521,4 +1528,9 @@ class _QueryProxy:
     def alternatives(self, question_id: str, **kwargs: Any) -> Any:
         result = self._get_engine().alternatives(question_id, **kwargs)
         self._touch_result_nodes(result, "alternatives")
+        return result
+
+    def counterfactual(self, node_id: str, **kwargs: Any) -> Any:
+        result = self._get_engine().counterfactual(node_id, **kwargs)
+        self._touch_result_nodes(result, "counterfactual")
         return result

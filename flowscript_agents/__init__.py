@@ -44,11 +44,12 @@ from .memory import (
     SessionWrapResult,
 )
 from .unified import UnifiedMemory
-from .explain import explain
+from .explain import explain, explain_counterfactual
 
 __version__ = "0.2.9"
 __all__ = [
     "explain",
+    "explain_counterfactual",
     "AuditConfig",
     "AuditQueryResult",
     "AuditVerifyResult",
