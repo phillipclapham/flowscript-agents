@@ -184,7 +184,7 @@ def _ancestry_general(
         lines.append("")
         lines.append(
             f'Summary: The fundamental starting point was "{root}", which through '
-            f'{depth - 1} step{"s" if depth - 1 != 1 else ""} of reasoning led to '
+            f'{depth} step{"s" if depth != 1 else ""} of reasoning led to '
             f'"{target}".'
         )
 
