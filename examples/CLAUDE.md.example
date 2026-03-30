@@ -16,30 +16,28 @@ just report what you found or stored. Treat memory like your own notes.
   `search_memory` for specific topics. Check `query_blocked` for
   outstanding blockers. Mention relevant findings naturally.
 - **During work:** Call `add_memory` when important decisions are made,
-  architectural tradeoffs are discussed, blockers are identified, or
-  causal relationships emerge. Include full context. Do this proactively
-  without being asked — if reasoning is worth preserving, store it.
+  tradeoffs are discussed, blockers are identified, or causal relationships
+  emerge. Include full context — the reasoning, not just the fact.
+  Do this proactively without being asked.
+- **Capturing exchanges:** Call `encode_exchange` after significant
+  user-assistant exchanges to capture the full reasoning context
+  in the graph automatically.
 - **Before decisions:** Call `query_tensions` to surface prior tradeoffs
   and `search_memory` to check for relevant prior reasoning.
 - **When asked "why":** Call `query_why` to trace causal chains, or
   `query_alternatives` to see what options were considered.
 - **When considering changes:** Call `query_what_if` to trace downstream
-  consequences before committing.
+  consequences. Call `query_counterfactual` to explore what would need
+  to change for a different outcome.
 - **To correct mistakes:** Call `remove_memory` with a node_id (use
-  `search_memory` first to find it) to remove incorrect or outdated entries.
-- **End of session:** When the user says "wrap up", "let's wrap",
-  "save what we learned", or signals the conversation is ending:
-  review for any decisions/tradeoffs/reasoning not yet stored via
-  `add_memory`, save what's important, then call `session_wrap`.
-  This is the reasoning graph's consolidation cycle — like sleep for
-  memory. Dormant nodes get pruned to the audit trail, frequently-used
-  knowledge graduates through temporal tiers (current → developing →
-  proven → foundation), and the graph gets smarter over time. Without
-  regular wraps, knowledge accumulates as noise instead of maturing.
-  NOTE: An auto-wrap safety net runs after 5 minutes of inactivity
-  and on process exit, but explicit wraps at session boundaries
-  produce the best results because you can review and store final
-  reasoning before consolidation happens.
+  `search_memory` first to find it) to remove incorrect entries.
+- **End of session:** When the user signals the conversation is ending,
+  review for any reasoning not yet stored via `add_memory`, then call
+  `session_wrap`. This is the reasoning graph's consolidation cycle —
+  dormant nodes get pruned to the audit trail, frequently-used
+  knowledge graduates through temporal tiers, and the graph gets
+  smarter over time. An auto-wrap safety net runs after 5 minutes
+  of inactivity, but explicit wraps produce the best results.
 
 **What to remember (call `add_memory`):**
 - Decisions and their rationale ("We chose PostgreSQL because...")
@@ -56,5 +54,4 @@ just report what you found or stored. Treat memory like your own notes.
 **How to present results:**
 - Report findings naturally: "From prior sessions, there's a tension
   between X and Y" — not "FlowScript's query_tensions tool found..."
-- Don't explain how the memory system works unless asked
 - Don't narrate tool calls — just use them and share what's relevant
