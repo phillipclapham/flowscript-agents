@@ -949,7 +949,7 @@ class MCPHandler:
             "path": result.path,
         }
 
-        # Include continuity metadata in response
+        # Always include continuity key so callers can distinguish disabled/error/success.
         if continuity_result:
             response["continuity"] = {
                 "produced": True,
@@ -959,6 +959,10 @@ class MCPHandler:
                 "truncated": continuity_result.truncated,
                 "path": ContinuityManager.continuity_path(self._memory_path),
             }
+        elif self._continuity_mgr:
+            response["continuity"] = {"produced": False, "reason": "error"}
+        else:
+            response["continuity"] = {"produced": False, "reason": "disabled"}
 
         return response
 

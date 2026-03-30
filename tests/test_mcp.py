@@ -384,6 +384,9 @@ class TestSessionWrap:
         assert result["nodes_before"] == 0
         assert result["nodes_after"] == 0
         assert result["nodes_pruned"] == 0
+        # continuity key always present even when disabled
+        assert result["continuity"]["produced"] is False
+        assert result["continuity"]["reason"] == "disabled"
 
     def test_wrap_with_data(self):
         handler, umem = _make_handler()
@@ -549,8 +552,9 @@ class TestSessionWrapWithContinuity:
             assert "error" not in result
             assert "nodes_before" in result
             assert result["saved"] is True
-            # No continuity metadata since it failed
-            assert "continuity" not in result
+            # continuity key always present — produced=False with reason="error" on failure
+            assert result["continuity"]["produced"] is False
+            assert result["continuity"]["reason"] == "error"
 
 
 class TestVersionNegotiation:
