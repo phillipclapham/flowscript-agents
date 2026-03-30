@@ -31,7 +31,7 @@ node.unblock()                                # remove blocked state
 
 ### Queries
 
-Five typed semantic queries that traverse the reasoning graph:
+Six typed semantic queries that traverse the reasoning graph:
 
 ```python
 mem.query.why(node_id)                        # causal chain backward

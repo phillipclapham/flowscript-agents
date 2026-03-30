@@ -99,7 +99,7 @@ This is the #1 footgun for multi-session usage. After any `load_or_create()` cal
 
 ## Touch-on-Query
 
-By default, all five query methods touch returned nodes (incrementing `frequency` and updating `lastTouched`). This drives graduation — knowledge that keeps getting queried earns its place.
+By default, all six query methods touch returned nodes (incrementing `frequency` and updating `lastTouched`). This drives graduation — knowledge that keeps getting queried earns its place.
 
 Disable with `touchOnQuery=False` on `MemoryOptions` for read-only analysis:
 

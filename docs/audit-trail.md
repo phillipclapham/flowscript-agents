@@ -74,7 +74,7 @@ result = Memory.query_audit("agent-memory.audit.jsonl",
 
 ## MCP Audit Tools
 
-The Python MCP server exposes `query_audit` and `verify_audit` as tools (13 tools total). When configured with an `AuditConfig`, your agent can query and verify the audit trail through natural conversation:
+The Python MCP server exposes `query_audit` and `verify_audit` as tools (20 tools total). When configured with an `AuditConfig`, your agent can query and verify the audit trail through natural conversation:
 
 - **`query_audit`** filters by time range, event types, node ID, session ID, adapter, and limit. Supports optional chain verification.
 - **`verify_audit`** checks the full hash chain integrity and returns entry counts.
