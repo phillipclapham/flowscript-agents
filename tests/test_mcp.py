@@ -393,6 +393,14 @@ class TestSessionWrap:
         assert result["nodes_before"] == 1
         assert result["nodes_after"] >= 0  # may prune if dormant
 
+    def test_wrap_continuity_disabled(self):
+        """session_wrap without continuity manager reports disabled."""
+        handler, umem = _make_handler()
+        umem.memory.session_start()
+        result = handler.handle_tool("session_wrap", {})
+        assert result["continuity"]["produced"] is False
+        assert result["continuity"]["reason"] == "disabled"
+
 
 class TestAutoConfiguration:
     """Tests for OPENAI_API_KEY auto-detection logic."""
@@ -549,8 +557,9 @@ class TestSessionWrapWithContinuity:
             assert "error" not in result
             assert "nodes_before" in result
             assert result["saved"] is True
-            # No continuity metadata since it failed
-            assert "continuity" not in result
+            # Continuity key present but indicates failure
+            assert result["continuity"]["produced"] is False
+            assert result["continuity"]["reason"] == "error"
 
 
 class TestVersionNegotiation:
@@ -691,6 +700,16 @@ class TestThinkingModes:
         handler.handle_tool("think_creative", {"problem": "User onboarding"})
         handler.handle_tool("think_breakthrough", {"problem": "Scaling architecture"})
         assert umem.memory.size == nodes_before
+
+    def test_thinking_tool_descriptions_say_call_add_memory(self):
+        """Regression guard: descriptions must tell agents to call add_memory."""
+        from flowscript_agents.mcp import TOOLS
+        thinking_tools = [t for t in TOOLS if t["name"].startswith("think_")]
+        assert len(thinking_tools) == 3
+        for tool in thinking_tools:
+            assert "add_memory" in tool["description"], (
+                f"{tool['name']} description must mention add_memory"
+            )
 
 
 class TestDescriptionIntegrity:

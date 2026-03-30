@@ -489,3 +489,451 @@ class TestTruncation:
         assert result.text.startswith("# Agent")
         # Should have at least State section
         assert "## State" in result.text
+
+
+class TestGraduationValidation:
+    """Tests for graph-grounded graduation — anti-semantic-inbreeding defense."""
+
+    def test_valid_citation_kept(self):
+        text = (
+            "## Patterns\n"
+            "thought: caching helps | 2x (2026-03-30) [evidence: abc12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345", "def67890"}, today="2026-03-30"
+        )
+        assert "| 2x" in result_text
+        assert "ungrounded" not in result_text
+        assert validated == 1
+        assert demoted == 0
+
+    def test_invalid_citation_demoted(self):
+        text = (
+            "## Patterns\n"
+            "thought: caching helps | 2x (2026-03-30) [evidence: ffffffff]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert "| 1x" in result_text
+        assert "| 2x" not in result_text
+        assert "(ungrounded)" in result_text
+        assert validated == 0
+        assert demoted == 1
+
+    def test_3x_demoted_to_2x(self):
+        text = (
+            "## Patterns\n"
+            "thought: principle | 3x (2026-03-30) [evidence: badbadba]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert "| 2x" in result_text
+        assert "| 3x" not in result_text
+        assert "(ungrounded)" in result_text
+        assert demoted == 1
+
+    def test_no_citations_passthrough(self):
+        """Old-format patterns without [evidence:] pass through unchanged."""
+        text = (
+            "## Patterns\n"
+            "thought: caching helps | 2x (2026-03-30)\n"
+            "thought: pooling matters | 3x (2026-03-30)\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert result_text == text
+        assert validated == 0
+        assert demoted == 0
+
+    def test_mixed_valid_and_invalid(self):
+        text = (
+            "## Patterns\n"
+            "thought: good pattern | 2x (2026-03-30) [evidence: abc12345]\n"
+            "thought: hallucinated | 2x (2026-03-30) [evidence: ffffffff]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 1
+        # First pattern kept at 2x, second demoted to 1x
+        lines = result_text.split("\n")
+        assert "| 2x" in lines[1]
+        assert "| 1x" in lines[2]
+        assert "(ungrounded)" in lines[2]
+
+    def test_multiple_citations_one_valid_sufficient(self):
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: bad00000, abc12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 0
+        assert "| 2x" in result_text
+
+    def test_1x_not_affected(self):
+        """1x patterns are new observations — never checked for citations."""
+        text = (
+            "## Patterns\n"
+            "thought: new observation | 1x (2026-03-30)\n"
+            "thought: also new | 1x (2026-03-30) [evidence: ffffffff]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        # 1x lines are never matched by _GRADUATION_RE (only matches 2x/3x)
+        assert validated == 0
+        assert demoted == 0
+
+    def test_outside_patterns_section_ignored(self):
+        """Citations in non-Patterns sections should not be validated."""
+        text = (
+            "## State\n"
+            "some state | 2x (2026-03-30) [evidence: ffffffff]\n"
+            "## Patterns\n"
+            "thought: real pattern | 2x (2026-03-30) [evidence: abc12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        # Only the Patterns section line is checked
+        assert validated == 1
+        assert demoted == 0
+        # State section line unchanged (still has ffffffff)
+        assert "ffffffff" in result_text
+
+    def test_uppercase_citation_normalized(self):
+        """LLMs may uppercase hex — citations should be case-insensitive."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: ABC12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 0
+
+    def test_space_separated_citations(self):
+        """LLMs might use spaces instead of commas between IDs."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: bad00000 abc12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 0
+
+    def test_long_id_truncated_to_8_chars(self):
+        """LLM might cite full 64-char ID — should be truncated to 8 for matching."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: abc12345ffffffffffffffff]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 0
+
+    def test_carried_forward_evidence_not_demoted(self):
+        """Patterns from previous sessions (old dates) should pass through unchanged."""
+        text = (
+            "## Patterns\n"
+            "thought: old pattern | 2x (2026-03-28) [evidence: abc12345]\n"
+            "thought: new pattern | 2x (2026-03-30) [evidence: def67890]\n"
+            "## Decisions\n"
+        )
+        # abc12345 is NOT in valid_ids, but its date is old → should pass through
+        # def67890 IS in valid_ids and its date matches today → validated
+        result_text, validated, demoted, _reuse = ContinuityManager._validate_graduations(
+            text, {"def67890"}, today="2026-03-30"
+        )
+        assert validated == 1
+        assert demoted == 0
+        # Old pattern still at 2x (not demoted despite abc12345 not in current nodes)
+        assert "2026-03-28" in result_text
+        assert "ungrounded" not in result_text
+
+    def test_graduation_validation_through_produce(self):
+        """Integration: graduation validation works through the full produce() pipeline."""
+        import datetime
+        today = datetime.date.today().isoformat()
+
+        # Node ID 50d7c6fd = "Connection pooling will be the real bottleneck"
+        # from _make_session_memory(). Use today's date so validation fires.
+        response_with_valid_citation = f"""# Agent — Memory (v1)
+
+## State
+Working on database selection.
+
+## Patterns
+{{database_architecture:
+  thought: connection pooling is critical | 2x ({today}) [evidence: 50d7c6fd]
+  thought: ACID compliance matters | 2x ({today}) [evidence: ffffffff]
+}}
+
+## Decisions
+[decided(rationale: "ACID required", on: "{today}")] Use PostgreSQL
+
+## Context
+Selected PostgreSQL, investigating pooling."""
+
+        mgr = ContinuityManager(
+            llm=_make_mock_llm(response_with_valid_citation),
+        )
+        mem = _make_session_memory()
+        result = mgr.produce(mem)
+
+        # One citation valid (50d7c6fd exists), one invalid (ffffffff doesn't)
+        assert result.graduations_validated == 1
+        assert result.graduations_demoted == 1
+        assert "(ungrounded)" in result.text
+        # The valid graduation should still be 2x
+        assert "| 2x" in result.text
+        # The invalid one should be demoted to 1x
+        assert "| 1x" in result.text
+
+
+class TestExplanationValidation:
+    """Tests for explain-your-evidence — citation relevance checking."""
+
+    def test_explanation_with_node_content_overlap_passes(self):
+        text = (
+            '## Patterns\n'
+            'thought: pooling matters | 2x (2026-03-30) '
+            '[evidence: abc12345 "connection pooling identified as bottleneck"]\n'
+            '## Decisions\n'
+        )
+        node_map = {"abc12345": "Connection pooling will be the real bottleneck"}
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", node_content_map=node_map
+        )
+        assert validated == 1
+        assert demoted == 0
+
+    def test_explanation_without_overlap_demoted(self):
+        text = (
+            '## Patterns\n'
+            'thought: pooling matters | 2x (2026-03-30) '
+            '[evidence: abc12345 "confirms the pattern"]\n'
+            '## Decisions\n'
+        )
+        node_map = {"abc12345": "Connection pooling will be the real bottleneck"}
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", node_content_map=node_map
+        )
+        # "confirms the pattern" has no meaningful overlap with node content
+        assert validated == 0
+        assert demoted == 1
+        assert "(ungrounded)" in result_text
+
+    def test_no_explanation_still_passes_id_check(self):
+        """Citations without explanations pass on ID alone (backward compat)."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: abc12345]\n"
+            "## Decisions\n"
+        )
+        node_map = {"abc12345": "Some node content"}
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", node_content_map=node_map
+        )
+        # No explanation = no overlap check, just ID validation
+        assert validated == 1
+        assert demoted == 0
+
+    def test_no_node_map_skips_explanation_check(self):
+        """Without node_content_map, explanation check is skipped."""
+        text = (
+            '## Patterns\n'
+            'thought: pattern | 2x (2026-03-30) '
+            '[evidence: abc12345 "totally irrelevant words"]\n'
+            '## Decisions\n'
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", node_content_map=None
+        )
+        assert validated == 1
+        assert demoted == 0
+
+
+class TestCitationReuse:
+    """Tests for citation gaming detection."""
+
+    def test_reuse_count_tracked(self):
+        text = (
+            "## Patterns\n"
+            "thought: pattern A | 2x (2026-03-30) [evidence: abc12345]\n"
+            "thought: pattern B | 2x (2026-03-30) [evidence: abc12345]\n"
+            "thought: pattern C | 2x (2026-03-30) [evidence: abc12345]\n"
+            "## Decisions\n"
+        )
+        _text, _v, _d, reuse_max = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30"
+        )
+        assert reuse_max == 3
+
+
+class TestContinuityMeta:
+    """Tests for continuity metadata sidecar (session tracking, fail-safe sunset)."""
+
+    def test_meta_defaults_when_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "agent.json")
+            meta = ContinuityManager.load_meta(mem_path)
+            assert meta["sessions_produced"] == 0
+            assert meta["citations_seen"] is False
+            assert meta["format_version"] == 1
+
+    def test_meta_save_and_load_roundtrip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "agent.json")
+            meta = {"sessions_produced": 5, "citations_seen": True, "format_version": 1}
+            ContinuityManager.save_meta(meta, mem_path)
+            loaded = ContinuityManager.load_meta(mem_path)
+            assert loaded == meta
+
+    def test_meta_path_follows_sidecar_pattern(self):
+        path = ContinuityManager.meta_path("/tmp/agent.json")
+        assert path == "/tmp/agent.continuity.meta.json"
+
+    def test_corrupt_meta_returns_defaults(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "agent.json")
+            meta_path = ContinuityManager.meta_path(mem_path)
+            with open(meta_path, "w") as f:
+                f.write("NOT JSON")
+            meta = ContinuityManager.load_meta(mem_path)
+            assert meta["sessions_produced"] == 0
+
+
+class TestFailSafeSunset:
+    """Tests for citation requirement enforcement after first successful citation."""
+
+    def test_bare_graduation_passes_before_sunset(self):
+        """Before citations_seen, bare graduations (no [evidence:]) pass through."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30)\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", citations_seen=False
+        )
+        assert demoted == 0
+        assert "| 2x" in result_text
+        assert "needs-evidence" not in result_text
+
+    def test_bare_graduation_demoted_after_sunset(self):
+        """After citations_seen, bare graduations are demoted with (needs-evidence)."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30)\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", citations_seen=True
+        )
+        assert demoted == 1
+        assert "| 1x" in result_text
+        assert "(needs-evidence)" in result_text
+
+    def test_bare_3x_demoted_to_2x_after_sunset(self):
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 3x (2026-03-30)\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", citations_seen=True
+        )
+        assert demoted == 1
+        assert "| 2x" in result_text
+        assert "(needs-evidence)" in result_text
+
+    def test_old_date_bare_graduation_unaffected_by_sunset(self):
+        """Carried-forward bare graduations from old sessions are not demoted."""
+        text = (
+            "## Patterns\n"
+            "thought: old pattern | 2x (2026-03-28)\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", citations_seen=True
+        )
+        assert demoted == 0
+        assert "| 2x" in result_text
+
+    def test_cited_graduation_still_passes_after_sunset(self):
+        """Properly cited graduations pass regardless of sunset state."""
+        text = (
+            "## Patterns\n"
+            "thought: pattern | 2x (2026-03-30) [evidence: abc12345]\n"
+            "## Decisions\n"
+        )
+        result_text, validated, demoted, _r = ContinuityManager._validate_graduations(
+            text, {"abc12345"}, today="2026-03-30", citations_seen=True
+        )
+        assert validated == 1
+        assert demoted == 0
+
+    def test_no_reuse(self):
+        text = (
+            "## Patterns\n"
+            "thought: pattern A | 2x (2026-03-30) [evidence: abc12345]\n"
+            "thought: pattern B | 2x (2026-03-30) [evidence: def67890]\n"
+            "## Decisions\n"
+        )
+        _text, _v, _d, reuse_max = ContinuityManager._validate_graduations(
+            text, {"abc12345", "def67890"}, today="2026-03-30"
+        )
+        assert reuse_max == 1
+
+    def test_reuse_in_produce_result(self):
+        """citation_reuse_max flows through to ContinuityResult."""
+        import datetime
+        today = datetime.date.today().isoformat()
+
+        response = f"""# Test — Memory (v1)
+
+## State
+Testing.
+
+## Patterns
+thought: A | 2x ({today}) [evidence: 50d7c6fd]
+thought: B | 2x ({today}) [evidence: 50d7c6fd]
+thought: C | 2x ({today}) [evidence: 50d7c6fd]
+
+## Decisions
+None.
+
+## Context
+Testing citation reuse."""
+
+        mgr = ContinuityManager(llm=_make_mock_llm(response))
+        mem = _make_session_memory()
+        result = mgr.produce(mem)
+        assert result.citation_reuse_max == 3

@@ -39,6 +39,16 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
+# Matches graduated patterns (2x or 3x) with [evidence: <id> "explanation"] citations.
+# Captures: (1) level, (2) date, (3) cited IDs, (4) optional explanation in quotes.
+# Used by _validate_graduations to verify citations against actual session nodes.
+_GRADUATION_RE = re.compile(
+    r'\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*'
+    r'([a-fA-F0-9][a-fA-F0-9, ]*)'  # one or more hex IDs
+    r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
+)
+
+
 # =============================================================================
 # Result types
 # =============================================================================
@@ -54,6 +64,9 @@ class ContinuityResult:
     truncated: bool  # whether LLM output exceeded max_chars
     session_nodes_count: int  # how many nodes were in this session
     patterns_extracted: int  # estimated from output (best-effort)
+    graduations_validated: int = 0  # citations that checked out
+    graduations_demoted: int = 0  # citations that failed → demoted
+    citation_reuse_max: int = 0  # max times any single node was cited (>2 = suspicious)
 
 
 # =============================================================================
@@ -133,8 +146,21 @@ This is where learning happens. Use these markers for density:
 **Temporal graduation (CRITICAL — this is what makes the system learn):**
 - Mark each pattern with `| Nx (date)` where N = validation count, date = last validated
 - New observation from THIS session not in existing patterns → add at `| 1x ({today})`
-- Observation that VALIDATES an existing 1x pattern → increment to `| 2x ({today})`
-- Observation that VALIDATES an existing 2x pattern → graduate to `| 3x ({today})`
+- Observation that VALIDATES an existing 1x pattern → increment to:
+  `| 2x ({today}) [evidence: <node_id> "brief explanation of how node validates pattern"]`
+  where `<node_id>` is the 8-char ID prefix (e.g., `abc12345`) from the session data above.
+  The explanation MUST reference specific content from the cited node.
+- Observation that VALIDATES an existing 2x pattern → graduate to:
+  `| 3x ({today}) [evidence: <node_id> "explanation"]`
+- Evidence citations with explanations are REQUIRED for all graduations (2x and 3x).
+  Cite the specific session node AND explain how it validates the pattern.
+  Without a valid citation, the graduation will be rejected.
+- For patterns you are NOT graduating (carrying forward at the same level), drop the
+  `[evidence:]` tag — evidence only appears on the graduation that created it.
+- Patterns marked `(ungrounded)` were demoted in a previous session due to invalid evidence.
+  They need FRESH validating evidence from THIS session to be re-graduated. Do not re-graduate
+  without new evidence — remove the `(ungrounded)` marker only when providing a valid citation.
+  Patterns marked `(ungrounded)` that you cannot provide fresh evidence for should be removed.
 - Patterns at 3x: extract the PRINCIPLE underneath, not the surface observations.
   Multiple related observations → single meta-pattern. This is compression-as-cognition.
 - Patterns with dates older than 7 days and no new validation → remove (they're stale)
@@ -144,7 +170,7 @@ Group related patterns in FlowScript blocks: `{{topic: ... }}`
 **Example Patterns section:**
 ```
 {{database_architecture:
-  thought: ACID compliance outweighs raw speed for financial data | 2x (2026-03-30)
+  thought: ACID compliance outweighs raw speed | 2x (2026-03-30) [evidence: 4931b6a8 "PostgreSQL chosen for ACID compliance"]
   thought: connection pooling is the real performance bottleneck | 1x (2026-03-30)
   ? horizontal scaling strategy ><[single-writer vs multi-writer] | 1x (2026-03-29)
 }}
@@ -304,6 +330,7 @@ class ContinuityManager:
         self,
         memory: Any,
         existing_continuity: str | None = None,
+        citations_seen: bool = False,
     ) -> ContinuityResult:
         """Produce a compressed continuity file from session memory.
 
@@ -311,6 +338,7 @@ class ContinuityManager:
             memory: A Memory instance containing the session's nodes.
             existing_continuity: The current continuity file text (if any).
                                  Pass None for first session.
+            citations_seen: If True, enforces citation requirement (fail-safe sunset).
 
         Returns:
             ContinuityResult with the compressed continuity text and metadata.
@@ -325,7 +353,8 @@ class ContinuityManager:
         temporal_map = dict(memory._temporal_map)
 
         return self.produce_from_nodes(
-            nodes, relationships, states, existing_continuity, temporal_map
+            nodes, relationships, states, existing_continuity, temporal_map,
+            citations_seen=citations_seen,
         )
 
     def produce_from_nodes(
@@ -335,12 +364,20 @@ class ContinuityManager:
         states: list[Any],
         existing_continuity: str | None = None,
         temporal_map: dict[str, Any] | None = None,
+        citations_seen: bool = False,
     ) -> ContinuityResult:
         """Produce continuity from raw node lists (alternative to Memory instance).
 
         Useful when you have nodes but not a full Memory object, e.g.,
         from a filtered set or from deserialized data.
+
+        Args:
+            citations_seen: If True, enforces citation requirement on all today's
+                           graduations. Set from metadata after first successful citation.
         """
+        import datetime
+        today = datetime.date.today().isoformat()
+
         session_summary = _format_session_nodes(
             nodes, relationships, states, temporal_map
         )
@@ -350,6 +387,7 @@ class ContinuityManager:
             existing_continuity=existing_continuity,
             project_name=self._project_name,
             max_chars=self._max_chars,
+            today=today,
         )
 
         _log(f"Producing continuity ({len(nodes)} nodes, max {self._max_chars} chars)")
@@ -374,6 +412,25 @@ class ContinuityManager:
             # (first session, something is better than nothing)
             _log("WARNING: No existing continuity to fall back to — using LLM output as-is")
 
+        # Validate graduation citations against actual session nodes.
+        # Only checks citations from today (carried-forward patterns are trusted).
+        valid_ids = {n.id[:8].lower() for n in nodes}
+        node_content_map = {n.id[:8].lower(): n.content for n in nodes}
+        text, grad_validated, grad_demoted, reuse_max = self._validate_graduations(
+            text, valid_ids, today=today, node_content_map=node_content_map,
+            citations_seen=citations_seen,
+        )
+        if grad_demoted:
+            _log(
+                f"Graduation validation: {grad_validated} validated, "
+                f"{grad_demoted} demoted (ungrounded)"
+            )
+        if reuse_max > 2:
+            _log(
+                f"Graduation warning: single node cited {reuse_max} times "
+                f"(possible citation gaming)"
+            )
+
         truncated = False
         if len(text) > self._max_chars:
             truncated = True
@@ -390,6 +447,9 @@ class ContinuityManager:
             truncated=truncated,
             session_nodes_count=len(nodes),
             patterns_extracted=patterns_extracted,
+            graduations_validated=grad_validated,
+            graduations_demoted=grad_demoted,
+            citation_reuse_max=reuse_max,
         )
 
     # -- File I/O --
@@ -403,6 +463,54 @@ class ContinuityManager:
         """
         p = Path(memory_path)
         return str(p.parent / f"{p.stem}.continuity.md")
+
+    @staticmethod
+    def meta_path(memory_path: str) -> str:
+        """Get the metadata sidecar path. ./agent.json → ./agent.continuity.meta.json"""
+        p = Path(memory_path)
+        return str(p.parent / f"{p.stem}.continuity.meta.json")
+
+    @staticmethod
+    def load_meta(memory_path: str) -> dict:
+        """Load continuity metadata from the JSON sidecar.
+
+        Returns a dict with keys: sessions_produced, citations_seen, format_version.
+        Returns defaults if the file doesn't exist.
+        """
+        import json
+        path = ContinuityManager.meta_path(memory_path)
+        defaults = {"sessions_produced": 0, "citations_seen": False, "format_version": 1}
+        if not os.path.exists(path):
+            return defaults
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Merge with defaults for forward compatibility
+            return {**defaults, **data}
+        except (json.JSONDecodeError, OSError):
+            _log(f"WARNING: corrupt continuity meta at {path} — using defaults")
+            return defaults
+
+    @staticmethod
+    def save_meta(meta: dict, memory_path: str) -> str:
+        """Save continuity metadata to the JSON sidecar. Atomic write."""
+        import json
+        path = ContinuityManager.meta_path(memory_path)
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return path
 
     # -- Validation --
 
@@ -423,6 +531,166 @@ class ContinuityManager:
                     if section in line:
                         found.add(section)
         return found == cls._REQUIRED_SECTIONS
+
+    # Minimum meaningful words for explanation-to-node content overlap check.
+    # Short/common words are excluded to avoid false positives.
+    _STOP_WORDS = frozenset(
+        "a an the is are was were be been being have has had do does did "
+        "will would shall should may might can could this that these those "
+        "it its he she they we you i me my our his her their in on at to "
+        "for of by with from and or but not no nor so if as".split()
+    )
+
+    # Matches bare graduations (2x or 3x) WITHOUT [evidence:] tags.
+    # Used to enforce citation requirement after fail-safe sunset.
+    _BARE_GRADUATION_RE = re.compile(
+        r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)\s*(?!\[evidence:)"
+    )
+
+    @staticmethod
+    def _validate_graduations(
+        text: str,
+        valid_ids: set[str],
+        today: str | None = None,
+        node_content_map: dict[str, str] | None = None,
+        citations_seen: bool = False,
+    ) -> tuple[str, int, int, int]:
+        """Validate evidence citations on graduated patterns.
+
+        Scans the ## Patterns section for 2x/3x lines with [evidence: <id> "explanation"].
+        Only validates citations whose date matches today (newly graduated this
+        session). Carried-forward patterns from previous sessions pass through
+        unchanged — their evidence was valid when originally graduated.
+
+        Validation checks (all must pass for a citation to be accepted):
+        1. At least one cited ID exists in the current session's node set
+        2. If an explanation is provided and node_content_map is available,
+           the explanation must reference actual content from the cited node
+           (word overlap check — prevents citation of irrelevant nodes)
+
+        If validation fails, demotes the graduation (3x→2x, 2x→1x).
+
+        Fail-safe sunset: when citations_seen=True, today's graduations WITHOUT
+        [evidence:] tags are also demoted. Before citations_seen, they pass through
+        (migration grace period). Once the LLM demonstrates citation ability, it
+        must always cite.
+
+        Returns:
+            (possibly_modified_text, validated_count, demoted_count, citation_reuse_max)
+        """
+        if today is None:
+            import datetime
+            today = datetime.date.today().isoformat()
+
+        lines = text.split("\n")
+        in_patterns = False
+        validated = 0
+        demoted = 0
+        citation_counts: dict[str, int] = {}  # track per-node citation frequency
+
+        for i, line in enumerate(lines):
+            # Track section boundaries (substring match, consistent with _validate_structure)
+            if line.startswith("## "):
+                in_patterns = "pattern" in line.lower()
+                continue
+            if not in_patterns:
+                continue
+
+            match = _GRADUATION_RE.search(line)
+            if match:
+                level = int(match.group(1))  # 2 or 3
+                date_str = match.group(2)    # YYYY-MM-DD
+                cited_raw = match.group(3)
+                explanation = match.group(4)  # may be None if no quotes
+
+                # Only validate citations from THIS session (today's date).
+                # Carried-forward patterns retain their evidence unchecked.
+                if date_str != today:
+                    continue
+
+                # Normalize cited IDs: lowercase, truncate to 8 chars, filter empties
+                cited_ids = {
+                    cid.strip().lower()[:8]
+                    for cid in re.split(r"[,\s]+", cited_raw)
+                    if cid.strip()
+                }
+
+                # Track citation frequency
+                for cid in cited_ids & valid_ids:
+                    citation_counts[cid] = citation_counts.get(cid, 0) + 1
+
+                # Check 1: at least one cited ID exists in session nodes
+                ids_valid = bool(cited_ids & valid_ids)
+
+                # Check 2: explanation references cited node content (if available)
+                explanation_valid = True
+                if ids_valid and explanation and node_content_map:
+                    matched_id = next(iter(cited_ids & valid_ids))
+                    node_content = node_content_map.get(matched_id, "")
+                    if node_content:
+                        explanation_valid = ContinuityManager._check_explanation_overlap(
+                            explanation, node_content
+                        )
+
+                if ids_valid and explanation_valid:
+                    validated += 1
+                else:
+                    demoted += 1
+                    demoted_level = level - 1
+                    old_marker = match.group(0)
+                    new_marker = old_marker.replace(
+                        f"| {level}x", f"| {demoted_level}x"
+                    )
+                    new_marker = re.sub(
+                        r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
+                        "(ungrounded)", new_marker
+                    )
+                    lines[i] = line.replace(old_marker, new_marker)
+                continue
+
+            # Fail-safe sunset: once the LLM has demonstrated citation ability,
+            # today's graduations WITHOUT [evidence:] are demoted.
+            if not citations_seen:
+                continue
+
+            bare_match = ContinuityManager._BARE_GRADUATION_RE.search(line)
+            if not bare_match:
+                continue
+
+            bare_level = int(bare_match.group(1))
+            bare_date = bare_match.group(2)
+            if bare_date != today:
+                continue
+
+            demoted += 1
+            demoted_level = bare_level - 1
+            old_marker = bare_match.group(0)
+            new_marker = old_marker.replace(
+                f"| {bare_level}x", f"| {demoted_level}x"
+            )
+            lines[i] = line.replace(old_marker, new_marker + " (needs-evidence)")
+
+        reuse_max = max(citation_counts.values()) if citation_counts else 0
+        return "\n".join(lines), validated, demoted, reuse_max
+
+    @classmethod
+    def _check_explanation_overlap(cls, explanation: str, node_content: str) -> bool:
+        """Check if an explanation references actual content from the cited node.
+
+        Uses word overlap (excluding stop words). At least one meaningful word
+        from the explanation must appear in the node content. This prevents
+        generic explanations like "confirms pattern" while allowing legitimate
+        paraphrasing.
+        """
+        def meaningful_words(text: str) -> set[str]:
+            return {
+                w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
+                if len(w) > 2 and w not in cls._STOP_WORDS
+            }
+
+        explanation_words = meaningful_words(explanation)
+        node_words = meaningful_words(node_content)
+        return bool(explanation_words & node_words)
 
     # -- File I/O --
 

@@ -579,8 +579,8 @@ _TOOL_DEFS_RAW = [
             "returned framework to analyze your problem thoroughly — deconstruct to "
             "fundamentals, trace consequences across multiple orders, verify "
             "assumptions explicitly, and hold contradictions without premature "
-            "resolution. Key insights from your analysis will be saved to memory "
-            "as typed reasoning nodes."
+            "resolution. After analysis, call add_memory to save key insights — "
+            "without this, your analysis is lost between sessions."
         ),
         "inputSchema": {
             "type": "object",
@@ -607,7 +607,8 @@ _TOOL_DEFS_RAW = [
             "fundamentally different angle. Returns a creative exploration framework. "
             "After calling, challenge every assumption — what constraints are real vs "
             "inherited? What would the opposite approach look like? What patterns from "
-            "unrelated domains apply? Insights will be saved to memory."
+            "unrelated domains apply? After exploration, call add_memory to save "
+            "breakthrough insights — without this, your exploration is lost between sessions."
         ),
         "inputSchema": {
             "type": "object",
@@ -634,8 +635,9 @@ _TOOL_DEFS_RAW = [
             "with assumption-breaking for a two-pronged attack: systematic depth AND "
             "lateral thinking simultaneously. Use when the problem requires both "
             "understanding WHY current approaches fail AND imagining fundamentally "
-            "different solutions. Returns a comprehensive framework. Key insights "
-            "saved to memory."
+            "different solutions. Returns a comprehensive framework. After analysis, "
+            "call add_memory to save key findings — without this, your analysis is "
+            "lost between sessions."
         ),
         "inputSchema": {
             "type": "object",
@@ -921,12 +923,19 @@ class MCPHandler:
         continuity_result = None
         if self._continuity_mgr and self._memory_path:
             try:
+                meta = ContinuityManager.load_meta(self._memory_path)
                 existing = ContinuityManager.load(self._memory_path)
                 continuity_result = self._continuity_mgr.produce(
                     self._umem.memory,
                     existing_continuity=existing,
+                    citations_seen=meta.get("citations_seen", False),
                 )
                 self._continuity_mgr.save(continuity_result.text, self._memory_path)
+                # Update metadata
+                meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+                if continuity_result.graduations_validated > 0:
+                    meta["citations_seen"] = True
+                ContinuityManager.save_meta(meta, self._memory_path)
             except Exception as e:
                 _log(f"Continuity production failed: {e}")
                 # Non-fatal — session_wrap still proceeds
@@ -949,7 +958,7 @@ class MCPHandler:
             "path": result.path,
         }
 
-        # Include continuity metadata in response
+        # Always include continuity key so callers can distinguish disabled/error/success.
         if continuity_result:
             response["continuity"] = {
                 "produced": True,
@@ -959,6 +968,10 @@ class MCPHandler:
                 "truncated": continuity_result.truncated,
                 "path": ContinuityManager.continuity_path(self._memory_path),
             }
+        elif self._continuity_mgr:
+            response["continuity"] = {"produced": False, "reason": "error"}
+        else:
+            response["continuity"] = {"produced": False, "reason": "disabled"}
 
         return response
 
@@ -1647,11 +1660,17 @@ def run_server(
                 current_nodes = umem.memory.size
                 if current_nodes > _last_node_count[0]:
                     try:
+                        meta = ContinuityManager.load_meta(memory_path)
                         existing = ContinuityManager.load(memory_path)
                         cont_result = continuity_mgr.produce(
                             umem.memory, existing_continuity=existing,
+                            citations_seen=meta.get("citations_seen", False),
                         )
                         continuity_mgr.save(cont_result.text, memory_path)
+                        meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+                        if cont_result.graduations_validated > 0:
+                            meta["citations_seen"] = True
+                        ContinuityManager.save_meta(meta, memory_path)
                         _continuity_produced[0] = True
                         _last_node_count[0] = current_nodes
                         _log(f"Auto-wrap: continuity produced ({cont_result.char_count} chars)")
