@@ -49,7 +49,7 @@ Session lifecycle:
 - Explicit session_wrap: LLM or user triggers consolidation at session end
 - atexit wrap: final consolidation when process exits
 
-Tools exposed (15):
+Tools exposed (17: 16 verified + verify_integrity):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
 - get_context: Get formatted memory for prompt injection
@@ -58,7 +58,9 @@ Tools exposed (15):
 - query_why: Trace causal chain for a node (returns structured data)
 - query_what_if: Trace downstream impact
 - query_alternatives: Reconstruct decision from options
+- query_counterfactual: Counterfactual analysis (CJEU C-203/22)
 - explain_decision: Generate deterministic Article 86 compliance explanation
+- encode_exchange: Per-response exchange capture for AutoExtract pipeline
 - remove_memory: Remove a node from memory
 - session_wrap: Session consolidation (graduation, pruning, audit trail, save)
 - memory_stats: Get memory statistics
@@ -99,7 +101,7 @@ def _log(msg: str) -> None:
 
 _PROTOCOL_VERSION = "2025-03-26"
 _SERVER_NAME = "flowscript-agents"
-_SERVER_VERSION = "0.2.6"
+_SERVER_VERSION = "0.3.0"
 
 
 def _jsonrpc_response(id: Any, result: Any) -> dict:
@@ -509,6 +511,31 @@ _TOOL_DEFS_RAW = [
         },
     },
     {
+        "name": "query_counterfactual",
+        "description": (
+            "Counterfactual analysis: what would need to change for a different "
+            "outcome? Satisfies CJEU Case C-203/22 requirement for counterfactual "
+            "explanations — not just 'why this' but 'why not that.' Walks backward "
+            "through the causal chain from a decision, finds tension-bearing "
+            "ancestors (pivotal factors), and identifies what conditions, if "
+            "different, would have led to a different outcome. Deterministic — "
+            "pure graph traversal, no LLM. Returns pivotal factors ranked "
+            "deepest-first (most fundamental first)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string", "description": "Decision node ID to analyze"},
+                "content": {"type": "string", "description": "Search for node by content (alternative to node_id)"},
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum causal chain depth to traverse (default: unlimited)",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "encode_exchange",
         "description": (
             "MANDATORY: Call this tool after EVERY response you generate. "
@@ -617,6 +644,7 @@ class MCPHandler:
             "query_audit": self._query_audit,
             "verify_audit": self._verify_audit,
             "explain_decision": self._explain_decision,
+            "query_counterfactual": self._query_counterfactual,
             "encode_exchange": self._encode_exchange,
             "verify_integrity": self._verify_integrity,
         }
@@ -749,6 +777,22 @@ class MCPHandler:
         if not question_id:
             return {"error": "No question found. Provide question_id or searchable content."}
         result = self._umem.memory.query.alternatives(question_id)
+        return _serialize_query_result(result)
+
+    def _query_counterfactual(self, args: dict) -> dict:
+        node_id = args.get("node_id")
+        content = args.get("content")
+        if not node_id and content:
+            refs = self._umem.memory.find_nodes(content)
+            if refs:
+                node_id = refs[0].id
+        if not node_id:
+            return {"error": "No node found. Provide node_id or searchable content."}
+        max_depth = args.get("max_depth")
+        kwargs = {}
+        if max_depth is not None:
+            kwargs["max_depth"] = max_depth
+        result = self._umem.memory.query.counterfactual(node_id, **kwargs)
         return _serialize_query_result(result)
 
     def _remove_memory(self, args: dict) -> dict:

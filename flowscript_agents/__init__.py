@@ -46,7 +46,7 @@ from .memory import (
 from .unified import UnifiedMemory
 from .explain import explain, explain_counterfactual
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
 __all__ = [
     "explain",
     "explain_counterfactual",

@@ -63,14 +63,13 @@ Notes:
     - Requires flowscript-agents with an LLM configured in UnifiedMemory
       for full extraction. Without an LLM, exchanges are stored as plain
       thought nodes (still queryable, just not semantically typed).
-    - Thread-safe: each create() call extracts independently.
+    - Not thread-safe: serialize access or use one wrapper per thread.
 """
 
 from __future__ import annotations
 
 import sys
-import threading
-from typing import Any, Iterator, AsyncIterator, TYPE_CHECKING
+from typing import Any, Callable, Iterator, AsyncIterator, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .unified import UnifiedMemory
@@ -83,7 +82,12 @@ def _log(msg: str) -> None:
 
 def _format_exchange(user_content: str, assistant_content: str) -> str:
     """Format a conversation exchange for AutoExtract ingestion."""
-    return f"User: {user_content}\nAssistant: {assistant_content}"
+    parts = []
+    if user_content:
+        parts.append(f"User: {user_content}")
+    if assistant_content:
+        parts.append(f"Assistant: {assistant_content}")
+    return "\n".join(parts)
 
 
 def _extract_user_content(messages: list[dict[str, Any]]) -> str:
@@ -103,12 +107,28 @@ def _extract_user_content(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _safe_add(memory: "UnifiedMemory", text: str) -> None:
-    """Add text to memory, swallowing errors so API calls always succeed."""
+def _safe_add(
+    memory: "UnifiedMemory",
+    text: str,
+    on_error: "Callable[[Exception, str], None] | None" = None,
+) -> bool:
+    """Add text to memory, swallowing errors so API calls always succeed.
+
+    Returns True if extraction succeeded, False if it failed.
+    If on_error is provided, calls it with (exception, exchange_text) on failure.
+    Errors are always logged to stderr regardless of on_error.
+    """
     try:
         memory.add(text, actor="agent")
+        return True
     except Exception as exc:
         _log(f"extraction error (suppressed): {exc}")
+        if on_error is not None:
+            try:
+                on_error(exc, text)
+            except Exception:
+                pass  # callback errors must not propagate
+        return False
 
 
 # =============================================================================
@@ -119,9 +139,20 @@ def _safe_add(memory: "UnifiedMemory", text: str) -> None:
 class _FlowScriptCompletions:
     """Wraps openai.resources.chat.completions.Completions."""
 
-    def __init__(self, completions: Any, memory: "UnifiedMemory") -> None:
+    def __init__(
+        self,
+        completions: Any,
+        memory: "UnifiedMemory",
+        on_extraction_error: "Callable[[Exception, str], None] | None" = None,
+    ) -> None:
         self._completions = completions
         self._memory = memory
+        self._on_error = on_extraction_error
+        self.failed_extraction_count = 0
+
+    def _track_add(self, text: str) -> None:
+        if not _safe_add(self._memory, text, self._on_error):
+            self.failed_extraction_count += 1
 
     def create(self, **kwargs: Any) -> Any:
         """Create a chat completion and capture the exchange."""
@@ -131,7 +162,7 @@ class _FlowScriptCompletions:
         response = self._completions.create(**kwargs)
 
         if stream:
-            return _StreamingCapture(response, messages, self._memory)
+            return _StreamingCapture(response, messages, self._memory, self._track_add)
 
         # Non-streaming: extract immediately
         user_content = _extract_user_content(messages)
@@ -141,20 +172,27 @@ class _FlowScriptCompletions:
             assistant_content = ""
 
         if user_content or assistant_content:
-            exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            self._track_add(_format_exchange(user_content, assistant_content))
 
         return response
 
     async def acreate(self, **kwargs: Any) -> Any:
-        """Async create — capture exchange after awaiting response."""
+        """Async create — capture exchange after awaiting response.
+
+        Works with both legacy ``acreate()`` and modern (v1+) async ``create()``.
+        Falls back to ``create()`` if the underlying client has no ``acreate``.
+        """
         messages: list[dict[str, Any]] = kwargs.get("messages", [])
         stream: bool = kwargs.get("stream", False)
 
-        response = await self._completions.acreate(**kwargs)
+        # Modern OpenAI SDK (v1+): async client uses create(), not acreate()
+        if hasattr(self._completions, "acreate"):
+            response = await self._completions.acreate(**kwargs)
+        else:
+            response = await self._completions.create(**kwargs)
 
         if stream:
-            return _AsyncStreamingCapture(response, messages, self._memory)
+            return _AsyncStreamingCapture(response, messages, self._memory, self._track_add)
 
         user_content = _extract_user_content(messages)
         try:
@@ -163,8 +201,7 @@ class _FlowScriptCompletions:
             assistant_content = ""
 
         if user_content or assistant_content:
-            exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            self._track_add(_format_exchange(user_content, assistant_content))
 
         return response
 
@@ -175,9 +212,14 @@ class _FlowScriptCompletions:
 class _FlowScriptChat:
     """Wraps openai.resources.chat.Chat."""
 
-    def __init__(self, chat: Any, memory: "UnifiedMemory") -> None:
+    def __init__(
+        self,
+        chat: Any,
+        memory: "UnifiedMemory",
+        on_extraction_error: "Callable[[Exception, str], None] | None" = None,
+    ) -> None:
         self._chat = chat
-        self.completions = _FlowScriptCompletions(chat.completions, memory)
+        self.completions = _FlowScriptCompletions(chat.completions, memory, on_extraction_error)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._chat, name)
@@ -190,10 +232,21 @@ class FlowScriptOpenAI:
     All API methods pass through unchanged except:
     - client.chat.completions.create() → captures exchange to memory
 
+    Note: Not thread-safe. Serialize access to the wrapped client or
+    use one wrapper instance per thread.
+
     Args:
         client: An openai.OpenAI (or AsyncOpenAI) instance.
         memory: A UnifiedMemory instance with LLM configured for extraction.
                 Without an LLM, exchanges are stored as plain thought nodes.
+        on_extraction_error: Optional callback ``(exception, exchange_text) -> None``
+                called when extraction fails. Errors are always logged to stderr;
+                this callback provides programmatic visibility for compliance use cases.
+
+    Attributes:
+        failed_extraction_count: Number of exchanges where extraction failed.
+            Always available, zero cost. Check this to detect silent gaps in
+            the audit trail.
 
     Example::
 
@@ -209,12 +262,22 @@ class FlowScriptOpenAI:
             messages=[{"role": "user", "content": "Which database?"}]
         )
         mem.memory.query.tensions()  # FlowScript has the exchange
+        assert client.failed_extraction_count == 0  # no gaps
     """
 
-    def __init__(self, client: Any, memory: "UnifiedMemory") -> None:
+    def __init__(
+        self,
+        client: Any,
+        memory: "UnifiedMemory",
+        on_extraction_error: "Callable[[Exception, str], None] | None" = None,
+    ) -> None:
         self._client = client
         self._memory = memory
-        self.chat = _FlowScriptChat(client.chat, memory)
+        self.chat = _FlowScriptChat(client.chat, memory, on_extraction_error)
+
+    @property
+    def failed_extraction_count(self) -> int:
+        return self.chat.completions.failed_extraction_count
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
@@ -228,9 +291,20 @@ class FlowScriptOpenAI:
 class _FlowScriptMessages:
     """Wraps anthropic.resources.Messages."""
 
-    def __init__(self, messages_resource: Any, memory: "UnifiedMemory") -> None:
+    def __init__(
+        self,
+        messages_resource: Any,
+        memory: "UnifiedMemory",
+        on_extraction_error: "Callable[[Exception, str], None] | None" = None,
+    ) -> None:
         self._messages = messages_resource
         self._memory = memory
+        self._on_error = on_extraction_error
+        self.failed_extraction_count = 0
+
+    def _track_add(self, text: str) -> None:
+        if not _safe_add(self._memory, text, self._on_error):
+            self.failed_extraction_count += 1
 
     def create(self, **kwargs: Any) -> Any:
         """Create a message and capture the exchange."""
@@ -240,34 +314,38 @@ class _FlowScriptMessages:
         response = self._messages.create(**kwargs)
 
         if stream:
-            return _AnthropicStreamingCapture(response, messages, self._memory)
+            return _AnthropicStreamingCapture(response, messages, self._memory, self._track_add)
 
         # Non-streaming: extract immediately
         user_content = _extract_user_content(messages)
         assistant_content = _extract_anthropic_content(response)
 
         if user_content or assistant_content:
-            exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            self._track_add(_format_exchange(user_content, assistant_content))
 
         return response
 
     async def acreate(self, **kwargs: Any) -> Any:
-        """Async create."""
+        """Async create.
+
+        Works with both legacy ``acreate()`` and modern async ``create()``.
+        """
         messages: list[dict[str, Any]] = kwargs.get("messages", [])
         stream: bool = kwargs.get("stream", False)
 
-        response = await self._messages.acreate(**kwargs)
+        if hasattr(self._messages, "acreate"):
+            response = await self._messages.acreate(**kwargs)
+        else:
+            response = await self._messages.create(**kwargs)
 
         if stream:
-            return _AnthropicAsyncStreamingCapture(response, messages, self._memory)
+            return _AnthropicAsyncStreamingCapture(response, messages, self._memory, self._track_add)
 
         user_content = _extract_user_content(messages)
         assistant_content = _extract_anthropic_content(response)
 
         if user_content or assistant_content:
-            exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            self._track_add(_format_exchange(user_content, assistant_content))
 
         return response
 
@@ -301,9 +379,20 @@ class FlowScriptAnthropic:
     All API methods pass through unchanged except:
     - client.messages.create() → captures exchange to memory
 
+    Note: Not thread-safe. Serialize access to the wrapped client or
+    use one wrapper instance per thread.
+
     Args:
         client: An anthropic.Anthropic (or AsyncAnthropic) instance.
         memory: A UnifiedMemory instance with LLM configured for extraction.
+        on_extraction_error: Optional callback ``(exception, exchange_text) -> None``
+                called when extraction fails. Errors are always logged to stderr;
+                this callback provides programmatic visibility for compliance use cases.
+
+    Attributes:
+        failed_extraction_count: Number of exchanges where extraction failed.
+            Always available, zero cost. Check this to detect silent gaps in
+            the audit trail.
 
     Example::
 
@@ -320,12 +409,22 @@ class FlowScriptAnthropic:
             messages=[{"role": "user", "content": "Which database?"}]
         )
         mem.memory.query.tensions()  # FlowScript has the exchange
+        assert client.failed_extraction_count == 0  # no gaps
     """
 
-    def __init__(self, client: Any, memory: "UnifiedMemory") -> None:
+    def __init__(
+        self,
+        client: Any,
+        memory: "UnifiedMemory",
+        on_extraction_error: "Callable[[Exception, str], None] | None" = None,
+    ) -> None:
         self._client = client
         self._memory = memory
-        self.messages = _FlowScriptMessages(client.messages, memory)
+        self.messages = _FlowScriptMessages(client.messages, memory, on_extraction_error)
+
+    @property
+    def failed_extraction_count(self) -> int:
+        return self.messages.failed_extraction_count
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
@@ -344,10 +443,12 @@ class _StreamingCapture:
         stream: Any,
         messages: list[dict[str, Any]],
         memory: "UnifiedMemory",
+        track_add: "Callable[[str], None] | None" = None,
     ) -> None:
         self._stream = stream
         self._messages = messages
         self._memory = memory
+        self._track_add = track_add
         self._chunks: list[str] = []
 
     def __iter__(self) -> Iterator[Any]:
@@ -368,7 +469,10 @@ class _StreamingCapture:
         assistant_content = "".join(self._chunks)
         if user_content or assistant_content:
             exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            if self._track_add:
+                self._track_add(exchange)
+            else:
+                _safe_add(self._memory, exchange)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
@@ -382,10 +486,12 @@ class _AsyncStreamingCapture:
         stream: Any,
         messages: list[dict[str, Any]],
         memory: "UnifiedMemory",
+        track_add: "Callable[[str], None] | None" = None,
     ) -> None:
         self._stream = stream
         self._messages = messages
         self._memory = memory
+        self._track_add = track_add
         self._chunks: list[str] = []
 
     async def __aiter__(self) -> AsyncIterator[Any]:
@@ -406,7 +512,10 @@ class _AsyncStreamingCapture:
         assistant_content = "".join(self._chunks)
         if user_content or assistant_content:
             exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            if self._track_add:
+                self._track_add(exchange)
+            else:
+                _safe_add(self._memory, exchange)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
@@ -420,11 +529,14 @@ class _AnthropicStreamingCapture:
         stream: Any,
         messages: list[dict[str, Any]],
         memory: "UnifiedMemory",
+        track_add: "Callable[[str], None] | None" = None,
     ) -> None:
         self._stream = stream
         self._messages = messages
         self._memory = memory
+        self._track_add = track_add
         self._chunks: list[str] = []
+        self._captured = False
 
     def __iter__(self) -> Iterator[Any]:
         try:
@@ -440,11 +552,17 @@ class _AnthropicStreamingCapture:
             self._capture()
 
     def _capture(self) -> None:
+        if self._captured:
+            return
+        self._captured = True
         user_content = _extract_user_content(self._messages)
         assistant_content = "".join(self._chunks)
         if user_content or assistant_content:
             exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            if self._track_add:
+                self._track_add(exchange)
+            else:
+                _safe_add(self._memory, exchange)
 
     def __enter__(self) -> "_AnthropicStreamingCapture":
         if hasattr(self._stream, "__enter__"):
@@ -470,11 +588,14 @@ class _AnthropicAsyncStreamingCapture:
         stream: Any,
         messages: list[dict[str, Any]],
         memory: "UnifiedMemory",
+        track_add: "Callable[[str], None] | None" = None,
     ) -> None:
         self._stream = stream
         self._messages = messages
         self._memory = memory
+        self._track_add = track_add
         self._chunks: list[str] = []
+        self._captured = False
 
     async def __aiter__(self) -> AsyncIterator[Any]:
         try:
@@ -489,11 +610,17 @@ class _AnthropicAsyncStreamingCapture:
             self._capture()
 
     def _capture(self) -> None:
+        if self._captured:
+            return
+        self._captured = True
         user_content = _extract_user_content(self._messages)
         assistant_content = "".join(self._chunks)
         if user_content or assistant_content:
             exchange = _format_exchange(user_content, assistant_content)
-            _safe_add(self._memory, exchange)
+            if self._track_add:
+                self._track_add(exchange)
+            else:
+                _safe_add(self._memory, exchange)
 
     async def __aenter__(self) -> "_AnthropicAsyncStreamingCapture":
         if hasattr(self._stream, "__aenter__"):

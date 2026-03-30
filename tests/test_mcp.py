@@ -31,14 +31,14 @@ class TestToolDefinitions:
             assert "inputSchema" in tool
 
     def test_tool_count(self):
-        assert len(TOOLS) == 15
+        assert len(TOOLS) == 16
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
         expected = {
             "search_memory", "add_memory", "get_context",
             "query_tensions", "query_blocked", "query_why",
-            "query_what_if", "query_alternatives",
+            "query_what_if", "query_alternatives", "query_counterfactual",
             "remove_memory", "session_wrap", "memory_stats",
             "query_audit", "verify_audit", "explain_decision",
             "encode_exchange",
@@ -298,7 +298,7 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 16  # 15 verified + verify_integrity
+        assert len(tools) == 17  # 16 verified + verify_integrity
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names
@@ -591,7 +591,7 @@ class TestDescriptionIntegrity:
         result = handler.handle_tool("verify_integrity", {})
         assert result["verdict"] == "PASS"
         assert result["count_match"] is True
-        assert result["tool_count"] == 15  # verified tools (not counting verify_integrity itself)
+        assert result["tool_count"] == 16  # verified tools (not counting verify_integrity itself)
 
     def test_verify_integrity_per_tool_status(self):
         """Each tool should have pass status with matching hashes."""
@@ -723,3 +723,64 @@ class TestAutoWrapTimer:
         assert "auto-wrap" in desc.lower()
         assert "consolidation" in desc.lower()
         assert "temporal tiers" in desc.lower() or "temporal" in desc.lower()
+
+
+class TestEncodeExchangeHandler:
+    """Happy-path tests for the encode_exchange MCP tool."""
+
+    def test_encode_exchange_creates_nodes(self):
+        """encode_exchange should create nodes from exchange text."""
+        handler, umem = _make_handler(with_llm=True)
+        result = handler.handle_tool("encode_exchange", {
+            "user_content": "Should we use Redis or PostgreSQL for sessions?",
+            "assistant_content": "PostgreSQL is better for ACID compliance.",
+        })
+        assert "error" not in result
+        assert result["exchange_captured"] is True
+        assert result["nodes_created"] >= 1
+
+    def test_encode_exchange_empty_rejected(self):
+        """encode_exchange with empty content returns error."""
+        handler, _ = _make_handler()
+        result = handler.handle_tool("encode_exchange", {
+            "user_content": "",
+            "assistant_content": "",
+        })
+        assert "error" in result
+
+
+class TestQueryCounterfactualHandler:
+    """Happy-path tests for the query_counterfactual MCP tool."""
+
+    def test_counterfactual_returns_factors(self):
+        """query_counterfactual should find tension-bearing factors."""
+        handler, umem = _make_handler()
+        mem = umem.memory
+        low_cost = mem.thought("low cost option")
+        high_perf = mem.thought("high performance option")
+        mem.tension(low_cost, high_perf, "cost vs performance")
+        decision = mem.thought("chose low cost")
+        low_cost.causes(decision)
+        result = handler.handle_tool("query_counterfactual", {"node_id": decision.id})
+        assert "error" not in result
+        assert len(result["factors"]) >= 1
+        assert result["factors"][0]["tension_axis"] == "cost vs performance"
+
+    def test_counterfactual_by_content(self):
+        """query_counterfactual should find node by content search."""
+        handler, umem = _make_handler()
+        mem = umem.memory
+        a = mem.thought("option alpha")
+        b = mem.thought("option beta")
+        mem.tension(a, b, "alpha vs beta")
+        decision = mem.thought("selected option alpha for the project")
+        a.causes(decision)
+        result = handler.handle_tool("query_counterfactual", {"content": "selected option alpha"})
+        assert "error" not in result
+        assert result["decision"]["id"] == decision.id
+
+    def test_counterfactual_no_node_returns_error(self):
+        """query_counterfactual with no matching node returns error."""
+        handler, _ = _make_handler()
+        result = handler.handle_tool("query_counterfactual", {"content": "nonexistent"})
+        assert "error" in result

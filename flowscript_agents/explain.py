@@ -477,9 +477,10 @@ def _counterfactual_general(
         lines.append(f"     If instead: {f.counterfactual_condition['content']}")
         lines.append("")
 
+    max_depth = max(f.depth for f in factors) if factors else 0
     lines.append(
         f"In total, {len(factors)} pivotal factor{'s were' if len(factors) != 1 else ' was'} "
-        f"identified across {factors[0].depth if factors else 0} levels of reasoning."
+        f"identified across {max_depth} level{'s' if max_depth != 1 else ''} of reasoning."
     )
     return "\n".join(lines)
 
@@ -533,11 +534,12 @@ def _counterfactual_legal(
 
     lines.append("CERTIFICATION")
     lines.append("")
+    max_depth = max((f.depth for f in factors), default=0)
     lines.append(
         f"This counterfactual analysis was computed deterministically from the "
         f"agent's recorded reasoning chain. {len(factors)} pivotal "
         f"factor{'s were' if len(factors) != 1 else ' was'} identified across "
-        f"{max(f.depth for f in factors)} levels of causal reasoning. "
+        f"{max_depth} level{'s' if max_depth != 1 else ''} of causal reasoning. "
         f"No large language model was used in generating this explanation."
     )
 

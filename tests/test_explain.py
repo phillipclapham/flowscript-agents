@@ -3,7 +3,7 @@
 import pytest
 
 from flowscript_agents import Memory
-from flowscript_agents.explain import explain, AUDIENCE_GENERAL, AUDIENCE_LEGAL, AUDIENCE_TECHNICAL
+from flowscript_agents.explain import explain, explain_counterfactual, AUDIENCE_GENERAL, AUDIENCE_LEGAL, AUDIENCE_TECHNICAL
 from flowscript_agents.query import CausalAncestry, MinimalWhy, CausalTree
 
 
@@ -410,3 +410,71 @@ class TestArticle86Compliance:
             result = mem.query.why(effect.id, format=fmt)
             text = explain(result)
             assert "credit score below threshold" in text, f"Root cause missing for format={fmt}"
+
+
+# =============================================================================
+# explain_counterfactual tests
+# =============================================================================
+
+
+class TestExplainCounterfactual:
+    """Tests for explain_counterfactual() — Article 86 counterfactual explanations."""
+
+    @pytest.fixture
+    def counterfactual_mem(self):
+        """Graph with tensions for counterfactual analysis."""
+        mem = Memory()
+        low_cost = mem.thought("low cost database option")
+        high_perf = mem.thought("high performance database option")
+        mem.tension(low_cost, high_perf, "cost vs performance")
+        decision = mem.thought("selected low cost database")
+        low_cost.causes(decision)
+        return mem, decision
+
+    def test_general_mode(self, counterfactual_mem):
+        """General mode produces readable output with factors."""
+        mem, decision = counterfactual_mem
+        result = mem.query.counterfactual(decision.id)
+        text = explain_counterfactual(result)
+        assert "pivotal factor" in text.lower()
+        assert "cost vs performance" in text
+
+    def test_legal_mode(self, counterfactual_mem):
+        """Legal mode includes CJEU citation and certification."""
+        mem, decision = counterfactual_mem
+        result = mem.query.counterfactual(decision.id)
+        text = explain_counterfactual(result, audience="legal")
+        assert "CJEU" in text or "C-203/22" in text
+        assert "CERTIFICATION" in text
+        assert "No large language model" in text
+        assert "deterministically" in text
+
+    def test_legal_mode_with_subject(self, counterfactual_mem):
+        """Subject label appears in legal output."""
+        mem, decision = counterfactual_mem
+        result = mem.query.counterfactual(decision.id)
+        text = explain_counterfactual(result, audience="legal", subject="Applicant #42")
+        assert "Applicant #42" in text
+
+    def test_empty_factors(self):
+        """No factors produces appropriate message."""
+        mem = Memory()
+        n = mem.thought("simple decision")
+        result = mem.query.counterfactual(n.id)
+        text = explain_counterfactual(result)
+        assert "no" in text.lower() or "without" in text.lower()
+
+    def test_empty_factors_legal(self):
+        """No factors in legal mode produces appropriate output."""
+        mem = Memory()
+        n = mem.thought("simple decision")
+        result = mem.query.counterfactual(n.id)
+        text = explain_counterfactual(result, audience="legal")
+        assert "no counterfactual factors" in text.lower()
+
+    def test_depth_in_summary(self, counterfactual_mem):
+        """Summary includes depth information."""
+        mem, decision = counterfactual_mem
+        result = mem.query.counterfactual(decision.id)
+        text = explain_counterfactual(result)
+        assert "level" in text.lower()

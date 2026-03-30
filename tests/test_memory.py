@@ -193,6 +193,74 @@ class TestQueries:
         result = mem.query.alternatives(q.id)
         assert len(result.alternatives) == 2
 
+    def test_counterfactual_basic(self):
+        """Counterfactual finds tension-bearing ancestors as pivotal factors."""
+        mem = Memory()
+        root = mem.thought("low cost option")
+        alt = mem.thought("high performance option")
+        mem.tension(root, alt, "cost vs performance")
+        decision = mem.thought("chose low cost")
+        root.causes(decision)
+        result = mem.query.counterfactual(decision.id)
+        assert len(result.factors) >= 1
+        assert result.factors[0].tension_axis == "cost vs performance"
+        assert result.causal_chain_depth >= 1
+
+    def test_counterfactual_no_tensions(self):
+        """Counterfactual with no tensions returns empty factors."""
+        mem = Memory()
+        a = mem.thought("simple cause")
+        b = mem.thought("simple effect")
+        a.causes(b)
+        result = mem.query.counterfactual(b.id)
+        assert len(result.factors) == 0
+        assert result.decision["id"] == b.id
+
+    def test_counterfactual_empty_graph(self):
+        """Counterfactual on isolated node returns empty factors."""
+        mem = Memory()
+        n = mem.thought("isolated decision")
+        result = mem.query.counterfactual(n.id)
+        assert len(result.factors) == 0
+
+    def test_counterfactual_max_depth(self):
+        """max_depth limits how far back the traversal goes."""
+        mem = Memory()
+        deep = mem.thought("deep root")
+        deep_alt = mem.thought("deep alternative")
+        mem.tension(deep, deep_alt, "deep tension")
+        mid = mem.thought("mid node")
+        deep.causes(mid)
+        shallow = mem.thought("shallow cause")
+        shallow_alt = mem.thought("shallow alternative")
+        mem.tension(shallow, shallow_alt, "shallow tension")
+        shallow.causes(mid)
+        decision = mem.thought("final decision")
+        mid.causes(decision)
+        # With max_depth=1, should only find tensions at depth <= 1
+        result_shallow = mem.query.counterfactual(decision.id, max_depth=1)
+        result_deep = mem.query.counterfactual(decision.id)
+        # Deep search should find at least as many factors
+        assert len(result_deep.factors) >= len(result_shallow.factors)
+        # Shallow search must respect depth constraint
+        assert all(f.depth <= 1 for f in result_shallow.factors)
+
+    def test_counterfactual_multi_tension(self):
+        """Multiple tensions at different depths all found."""
+        mem = Memory()
+        a = mem.thought("option A")
+        b = mem.thought("option B")
+        mem.tension(a, b, "axis 1")
+        c = mem.thought("derived from A")
+        a.causes(c)
+        d = mem.thought("option D")
+        mem.tension(c, d, "axis 2")
+        decision = mem.thought("final choice")
+        c.causes(decision)
+        result = mem.query.counterfactual(decision.id)
+        axes = {f.tension_axis for f in result.factors}
+        assert "axis 2" in axes  # direct tension on c (depth 1)
+
 
 class TestSerialization:
     def test_to_json(self):

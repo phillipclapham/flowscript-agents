@@ -643,7 +643,7 @@ def stage_6_explain():
 
 
 def stage_7_query_api():
-    """Stage 7: Verify all five query operations return valid results."""
+    """Stage 7: Verify all six query operations return valid results."""
     g = mem.memory
     failures = {}
     details = {}

@@ -148,7 +148,15 @@ class TestFormatExchange:
 
     def test_empty_strings(self):
         result = _format_exchange("", "")
-        assert result == "User: \nAssistant: "
+        assert result == ""
+
+    def test_partial_user_only(self):
+        result = _format_exchange("question", "")
+        assert result == "User: question"
+
+    def test_partial_assistant_only(self):
+        result = _format_exchange("", "answer")
+        assert result == "Assistant: answer"
 
 
 # =============================================================================

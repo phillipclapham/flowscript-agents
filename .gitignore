@@ -10,3 +10,10 @@ build/
 *.jsonl
 
 .DS_Store
+
+# Development-only validation scripts (hardcoded local paths)
+e2e_compliance_chain.py
+validate_wrapper.py
+validate_autonomous_agent.py
+e2e_output/
+validation_output/
