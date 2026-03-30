@@ -29,6 +29,7 @@ Usage:
 from .audit import AuditConfig, AuditQueryResult, AuditVerifyResult
 from .client import FlowScriptAnthropic, FlowScriptOpenAI
 from .cloud import CloudClient, CloudFlushResult, CloudWitness
+from .continuity import ContinuityManager, ContinuityResult
 from .memory import (
     Memory,
     MemoryOptions,
@@ -46,7 +47,7 @@ from .memory import (
 from .unified import UnifiedMemory
 from .explain import explain, explain_counterfactual
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "explain",
     "explain_counterfactual",
@@ -58,6 +59,8 @@ __all__ = [
     "CloudClient",
     "CloudFlushResult",
     "CloudWitness",
+    "ContinuityManager",
+    "ContinuityResult",
     "Memory",
     "MemoryOptions",
     "NodeRef",

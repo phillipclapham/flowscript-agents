@@ -49,7 +49,7 @@ Session lifecycle:
 - Explicit session_wrap: LLM or user triggers consolidation at session end
 - atexit wrap: final consolidation when process exits
 
-Tools exposed (17: 16 verified + verify_integrity):
+Tools exposed (20: 19 verified + verify_integrity):
 - search_memory: Unified search (vector + keyword + temporal)
 - add_memory: Auto-extract reasoning from text with consolidation
 - get_context: Get formatted memory for prompt injection
@@ -66,6 +66,9 @@ Tools exposed (17: 16 verified + verify_integrity):
 - memory_stats: Get memory statistics
 - query_audit: Search the audit trail with filters
 - verify_audit: Verify hash chain integrity
+- think_deeper: First-principles analytical framework
+- think_creative: Assumption-breaking exploration framework
+- think_breakthrough: Combined rigorous + creative analysis
 - verify_integrity: Verify tool description integrity (SRI for LLM prompts)
 """
 
@@ -85,6 +88,7 @@ from typing import Any, Optional
 
 from .memory import Memory
 from .unified import UnifiedMemory
+from .continuity import ContinuityManager
 from .embeddings.providers import EmbeddingProvider
 from .embeddings.consolidate import ConsolidationProvider
 
@@ -101,7 +105,7 @@ def _log(msg: str) -> None:
 
 _PROTOCOL_VERSION = "2025-03-26"
 _SERVER_NAME = "flowscript-agents"
-_SERVER_VERSION = "0.3.0"
+_SERVER_VERSION = "0.4.0"
 
 
 def _jsonrpc_response(id: Any, result: Any) -> dict:
@@ -246,11 +250,12 @@ _TOOL_DEFS_RAW = [
     {
         "name": "add_memory",
         "description": (
-            "Add information to agent memory. Call this when important decisions are "
-            "made, architectural tradeoffs are discussed, blockers are identified, "
-            "causal relationships are established, or any reasoning worth preserving "
-            "occurs in conversation. Include full context — the extraction layer "
-            "automatically identifies and types the reasoning structures (decisions "
+            "Add information to agent memory. Capture reasoning, not just conclusions — "
+            "WHY you decided matters more than WHAT you decided. Call this when important "
+            "decisions are made, architectural tradeoffs are discussed, blockers are "
+            "identified, causal relationships are established, or any reasoning worth "
+            "preserving occurs in conversation. Include full context — the extraction "
+            "layer automatically identifies and types the reasoning structures (decisions "
             "with rationale, tensions with axes, causal chains, blockers with reasons). "
             "Do NOT store routine code changes, transient debugging steps, or "
             "information already tracked in git. "
@@ -392,15 +397,17 @@ _TOOL_DEFS_RAW = [
     {
         "name": "session_wrap",
         "description": (
-            "Run memory lifecycle maintenance — the reasoning graph's consolidation "
-            "cycle. Prune dormant nodes to audit trail, graduate frequently-accessed "
-            "knowledge through temporal tiers, save to disk. Call this at the end of "
-            "a work session or when the user says to wrap up. Just like sleep "
-            "consolidates human memory, session wraps let the reasoning graph mature: "
-            "knowledge that keeps getting queried earns its place, one-off observations "
-            "fade naturally. An auto-wrap safety net runs after inactivity, but explicit "
-            "wraps at session boundaries produce the best results. Archived nodes are "
-            "preserved in the audit trail with full provenance — never destroyed."
+            "Run memory lifecycle maintenance — compress with judgment, not just storage. "
+            "Prune dormant nodes to audit trail, graduate frequently-accessed "
+            "knowledge through temporal tiers, extract patterns and principles from "
+            "session data, save to disk. Call this at the end of a work session or when "
+            "the user says to wrap up. Just like sleep consolidates human memory, session "
+            "wraps let the reasoning graph mature: knowledge that keeps getting queried "
+            "earns its place, one-off observations fade naturally. The act of compression "
+            "is itself a form of thinking — patterns emerge that weren't visible in the "
+            "raw data. An auto-wrap safety net runs after inactivity, but explicit wraps "
+            "at session boundaries produce the best results. Archived nodes are preserved "
+            "in the audit trail with full provenance — never destroyed."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
@@ -538,14 +545,13 @@ _TOOL_DEFS_RAW = [
     {
         "name": "encode_exchange",
         "description": (
-            "MANDATORY: Call this tool after EVERY response you generate. "
-            "Encodes the current user-assistant exchange into the reasoning "
-            "memory graph with typed extraction (decisions, tensions, causal "
-            "chains) and hash-chained audit trail. This is NOT optional — it "
-            "is a required protocol step for maintaining continuous memory. "
-            "Pass the user's message and your response. The extraction engine "
-            "automatically identifies reasoning structures. Lightweight call — "
-            "heavy lifting happens server-side."
+            "Encode a user-assistant exchange into the reasoning memory graph "
+            "with typed extraction (decisions, tensions, causal chains) and "
+            "hash-chained audit trail. When your instructions say to call this "
+            "after every response, do so — it captures the full reasoning chain "
+            "from each exchange. Pass the user's message and your response. The "
+            "extraction engine automatically identifies reasoning structures. "
+            "Lightweight call — heavy lifting happens server-side."
         ),
         "inputSchema": {
             "type": "object",
@@ -560,6 +566,90 @@ _TOOL_DEFS_RAW = [
                 },
             },
             "required": ["user_content", "assistant_content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "think_deeper",
+        "description": (
+            "Activate rigorous first-principles analysis for the current problem. "
+            "Call this when facing important architectural decisions, debugging "
+            "complex issues, or when standard approaches feel shallow. Returns a "
+            "structured analytical framework to apply. After calling, use the "
+            "returned framework to analyze your problem thoroughly — deconstruct to "
+            "fundamentals, trace consequences across multiple orders, verify "
+            "assumptions explicitly, and hold contradictions without premature "
+            "resolution. Key insights from your analysis will be saved to memory "
+            "as typed reasoning nodes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "problem": {
+                    "type": "string",
+                    "description": "The problem, question, or decision to analyze deeply",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional additional context for the analysis",
+                },
+            },
+            "required": ["problem"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "think_creative",
+        "description": (
+            "Break assumptions and explore unexpected connections for the current "
+            "problem. Call this when stuck after 2+ conventional attempts, when "
+            "standard approaches aren't producing insight, or when you need a "
+            "fundamentally different angle. Returns a creative exploration framework. "
+            "After calling, challenge every assumption — what constraints are real vs "
+            "inherited? What would the opposite approach look like? What patterns from "
+            "unrelated domains apply? Insights will be saved to memory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "problem": {
+                    "type": "string",
+                    "description": "The problem or situation to approach creatively",
+                },
+                "attempts": {
+                    "type": "string",
+                    "description": "Optional: what has been tried so far and why it failed",
+                },
+            },
+            "required": ["problem"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "think_breakthrough",
+        "description": (
+            "Combined rigorous + creative analysis for maximum problem-solving power. "
+            "Call this for the hardest problems where neither pure rigor nor pure "
+            "creativity alone is sufficient. Combines first-principles deconstruction "
+            "with assumption-breaking for a two-pronged attack: systematic depth AND "
+            "lateral thinking simultaneously. Use when the problem requires both "
+            "understanding WHY current approaches fail AND imagining fundamentally "
+            "different solutions. Returns a comprehensive framework. Key insights "
+            "saved to memory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "problem": {
+                    "type": "string",
+                    "description": "The hard problem requiring both rigor and creativity",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional: what's been tried, why it matters, constraints",
+                },
+            },
+            "required": ["problem"],
             "additionalProperties": False,
         },
     },
@@ -625,8 +715,15 @@ _INTEGRITY_RESOURCE = _deep_freeze({
 class MCPHandler:
     """Handles MCP tool calls against a UnifiedMemory instance."""
 
-    def __init__(self, umem: UnifiedMemory) -> None:
+    def __init__(
+        self,
+        umem: UnifiedMemory,
+        continuity_manager: Optional[ContinuityManager] = None,
+        memory_path: Optional[str] = None,
+    ) -> None:
         self._umem = umem
+        self._continuity_mgr = continuity_manager
+        self._memory_path = memory_path
 
     def handle_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -646,6 +743,9 @@ class MCPHandler:
             "explain_decision": self._explain_decision,
             "query_counterfactual": self._query_counterfactual,
             "encode_exchange": self._encode_exchange,
+            "think_deeper": self._think_deeper,
+            "think_creative": self._think_creative,
+            "think_breakthrough": self._think_breakthrough,
             "verify_integrity": self._verify_integrity,
         }
         handler = handlers.get(name)
@@ -731,7 +831,17 @@ class MCPHandler:
     def _get_context(self, args: dict) -> dict:
         max_tokens = args.get("max_tokens", 4000)
         context = self._umem.get_context(max_tokens=max_tokens)
-        return {"context": context, "nodes": self._umem.size}
+
+        result: dict[str, Any] = {"context": context, "nodes": self._umem.size}
+
+        # Include continuity file when Layer 1 is enabled
+        if self._continuity_mgr and self._memory_path:
+            continuity_text = ContinuityManager.load(self._memory_path)
+            if continuity_text:
+                result["continuity"] = continuity_text
+                result["continuity_chars"] = len(continuity_text)
+
+        return result
 
     def _query_tensions(self, args: dict) -> dict:
         group_by = args.get("group_by", "axis")
@@ -806,8 +916,24 @@ class MCPHandler:
         return {"removed": removed, "node_id": node_id}
 
     def _session_wrap(self, args: dict) -> dict:
+        # Produce continuity file BEFORE session_wrap prunes nodes
+        # (we want the full session data for compression)
+        continuity_result = None
+        if self._continuity_mgr and self._memory_path:
+            try:
+                existing = ContinuityManager.load(self._memory_path)
+                continuity_result = self._continuity_mgr.produce(
+                    self._umem.memory,
+                    existing_continuity=existing,
+                )
+                self._continuity_mgr.save(continuity_result.text, self._memory_path)
+            except Exception as e:
+                _log(f"Continuity production failed: {e}")
+                # Non-fatal — session_wrap still proceeds
+
         result = self._umem.memory.session_wrap()
-        return {
+
+        response: dict[str, Any] = {
             "nodes_before": result.nodes_before,
             "tiers_before": result.tiers_before,
             "nodes_after": result.nodes_after,
@@ -822,6 +948,19 @@ class MCPHandler:
             "saved": result.saved,
             "path": result.path,
         }
+
+        # Include continuity metadata in response
+        if continuity_result:
+            response["continuity"] = {
+                "produced": True,
+                "char_count": continuity_result.char_count,
+                "section_sizes": continuity_result.section_sizes,
+                "patterns_extracted": continuity_result.patterns_extracted,
+                "truncated": continuity_result.truncated,
+                "path": ContinuityManager.continuity_path(self._memory_path),
+            }
+
+        return response
 
     def _memory_stats(self, args: dict) -> dict:
         mem = self._umem.memory
@@ -972,6 +1111,177 @@ class MCPHandler:
             "states_created": result.states_created,
             "node_ids": result.node_ids,
             "exchange_captured": True,
+        }
+
+    # -- Thinking mode tools --
+
+    _DEEPER_FRAMEWORK = """## First-Principles Analysis Framework
+
+Apply this framework to your current problem. Think through each step carefully.
+
+### 1. Deconstruct to Fundamentals
+- What is the ACTUAL problem being solved? (Not the apparent one)
+- What orthogonal concerns are being conflated?
+- Strip assumptions to bedrock — what do you KNOW vs what do you ASSUME?
+
+### 2. Ordered Effects (trace fully)
+- **1st order:** Direct, obvious, immediate consequences
+- **2nd order:** Indirect, less obvious, short-term effects
+- **3rd order:** Emergent, surprising, medium-term implications
+- **4th order+:** Systemic, transformative, long-term shifts
+- Don't optimize 1st order at the expense of 3rd/4th
+
+### 3. Temporal Analysis
+- Immediate / short-term / medium-term / long-term
+- These are tradeoffs, not choices — find the compromise that honors all timeframes
+
+### 4. Verify Assumptions
+- "I assumed X" ≠ "I verified X"
+- What would you see if your key assumption were WRONG?
+- Which assumptions are load-bearing?
+
+### 5. Hold Contradictions
+- Multiple valid perspectives can coexist — don't force premature resolution
+- Where there's genuine tension, name the axis explicitly
+
+### 6. Synthesize
+- Devil's advocate: argue the opposite of your conclusion
+- Systems thinking: how does this connect to everything else?
+- What emerges from the analysis that wasn't visible before?"""
+
+    _CREATIVE_FRAMEWORK = """## Creative Exploration Framework
+
+Break free from conventional thinking. Apply each lens to your problem.
+
+### 1. Assumption Audit
+- What are you taking as GIVEN that could be questioned?
+- What constraints are actually constraints vs inherited/assumed?
+- What would someone who knows nothing about this try?
+
+### 2. Speculate Freely
+- "What if we..." without immediate feasibility filtering
+- Permission to propose wild ideas — quantity before quality
+- What's the most absurd approach that might actually work?
+
+### 3. Unexpected Connections
+- What does this remind you of from completely unrelated domains?
+- What patterns from nature, music, games, or architecture apply?
+- Analogical reasoning: "This is like X because..."
+
+### 4. Inversion
+- What's the OPPOSITE of the obvious approach?
+- What if you made the problem intentionally worse — what does that reveal?
+- What if the constraint IS the solution?
+
+### 5. Naive Questions
+- "Why do we do it this way?"
+- "What if we just didn't?"
+- "Says who?"
+- "What's the simplest thing that could possibly work?"
+
+### 6. Reframe
+- How would this look from a completely different stakeholder's perspective?
+- What if this isn't a problem to solve but a tension to manage?
+- What would you do if you had unlimited time? Zero time?"""
+
+    _BREAKTHROUGH_FRAMEWORK = """## Breakthrough Analysis Framework
+### Combined Rigorous + Creative — Maximum Problem-Solving Power
+
+Apply BOTH lenses simultaneously. Rigorous creativity / Creative rigor.
+
+### Phase 1: Rigorous Deconstruction
+- Deconstruct to first principles — what is the ACTUAL problem?
+- What orthogonal concerns are conflated?
+- Trace 1st → 2nd → 3rd → 4th order consequences
+- Verify every assumption explicitly
+
+### Phase 2: Creative Destruction
+- Now BREAK everything you just built
+- What assumptions in Phase 1 could be wrong?
+- What would the opposite approach look like?
+- What patterns from unrelated domains apply here?
+
+### Phase 3: Synthesis
+- Where do rigor and creativity CONVERGE? Those are structural insights.
+- Where do they DIVERGE? Those reveal hidden tensions.
+- What emerges that neither approach alone would find?
+- Hold the contradictions — name the axes of tension explicitly.
+
+### Phase 4: Action
+- What's the smallest experiment that would test your synthesis?
+- What would you need to see to know you're wrong?
+- What's the decision, and what's the rationale?
+
+The hardest problems require BOTH understanding why current approaches fail
+(rigor) AND imagining fundamentally different solutions (creativity).
+Neither alone is sufficient."""
+
+    def _think_deeper(self, args: dict) -> dict:
+        problem = args.get("problem", "").strip()
+        context = args.get("context", "")
+
+        if not problem:
+            return {"error": "problem is required — describe what you want to analyze"}
+
+        full_context = f"**Problem:** {problem}"
+        if context:
+            full_context += f"\n**Context:** {context}"
+
+        return {
+            "framework": self._DEEPER_FRAMEWORK,
+            "instruction": (
+                "Apply this analytical framework to the problem above. "
+                "Think through each step. IMPORTANT: After completing your "
+                "analysis, you MUST call add_memory with your key findings — "
+                "without this step, your analysis will be lost between sessions."
+            ),
+            "context": full_context,
+        }
+
+    def _think_creative(self, args: dict) -> dict:
+        problem = args.get("problem", "").strip()
+        attempts = args.get("attempts", "")
+
+        if not problem:
+            return {"error": "problem is required — describe what you want to explore"}
+
+        full_context = f"**Problem:** {problem}"
+        if attempts:
+            full_context += f"\n**Previous attempts:** {attempts}"
+
+        return {
+            "framework": self._CREATIVE_FRAMEWORK,
+            "instruction": (
+                "Apply this creative framework to break free from conventional "
+                "thinking. Challenge every assumption. IMPORTANT: After your "
+                "exploration, you MUST call add_memory with breakthrough insights — "
+                "without this step, your exploration will be lost between sessions."
+            ),
+            "context": full_context,
+        }
+
+    def _think_breakthrough(self, args: dict) -> dict:
+        problem = args.get("problem", "").strip()
+        context = args.get("context", "")
+
+        if not problem:
+            return {"error": "problem is required — describe what you want to break through"}
+
+        full_context = f"**Problem:** {problem}"
+        if context:
+            full_context += f"\n**Context:** {context}"
+
+        return {
+            "framework": self._BREAKTHROUGH_FRAMEWORK,
+            "instruction": (
+                "Apply BOTH rigorous deconstruction AND creative destruction "
+                "to this problem simultaneously. Where rigor and creativity "
+                "converge = structural insight. Where they diverge = hidden "
+                "tension. IMPORTANT: After analysis, you MUST call add_memory "
+                "with key findings — without this step, your analysis will be "
+                "lost between sessions."
+            ),
+            "context": full_context,
         }
 
     def _verify_integrity(self, args: dict) -> dict:
@@ -1285,7 +1595,17 @@ def run_server(
     # intelligence across the lifetime of this MCP server instance.
     umem.memory.session_start()
     umem.memory.set_adapter_context("mcp", "FlowScriptMCP", "server")
-    handler = MCPHandler(umem)
+
+    # Layer 1: Continuity (LLM-compressed session boundary file)
+    continuity_mgr: Optional[ContinuityManager] = None
+    if os.environ.get("FLOWSCRIPT_CONTINUITY", "").lower() in ("true", "1", "yes"):
+        if llm is not None:
+            continuity_mgr = ContinuityManager(llm=llm)
+            _log("Layer 1 (Continuity) enabled — session wraps produce compressed memory file")
+        else:
+            _log("Warning: FLOWSCRIPT_CONTINUITY=true but no LLM configured — continuity disabled")
+
+    handler = MCPHandler(umem, continuity_manager=continuity_mgr, memory_path=memory_path)
 
     # -------------------------------------------------------------------------
     # Auto-wrap timer: consolidation safety net for when the LLM or user
@@ -1301,6 +1621,8 @@ def run_server(
     auto_wrap_minutes = int(os.environ.get("FLOWSCRIPT_AUTO_WRAP_MINUTES", "5"))
     _auto_wrap_timer: list[Optional[threading.Timer]] = [None]  # mutable container for closure
     _session_wrapped: list[bool] = [False]  # track if wrap already happened
+    _continuity_produced: list[bool] = [False]  # track if continuity was produced this session (F2 fix)
+    _last_node_count: list[int] = [umem.memory.size]  # track node count to skip no-op wraps (F6 fix)
     _wrap_lock = threading.Lock()  # protects _session_wrapped check-then-act
 
     def _do_auto_wrap() -> None:
@@ -1319,6 +1641,25 @@ def run_server(
         # Lock released — flag prevents re-entry, and session_wrap() is now
         # safe to run without holding the lock (main thread won't enter).
         try:
+            # Produce continuity file BEFORE pruning (capture full session data)
+            # Skip if: already produced this session (F2), or no new nodes since last wrap (F6)
+            if continuity_mgr and memory_path and not _continuity_produced[0]:
+                current_nodes = umem.memory.size
+                if current_nodes > _last_node_count[0]:
+                    try:
+                        existing = ContinuityManager.load(memory_path)
+                        cont_result = continuity_mgr.produce(
+                            umem.memory, existing_continuity=existing,
+                        )
+                        continuity_mgr.save(cont_result.text, memory_path)
+                        _continuity_produced[0] = True
+                        _last_node_count[0] = current_nodes
+                        _log(f"Auto-wrap: continuity produced ({cont_result.char_count} chars)")
+                    except Exception as e:
+                        _log(f"Auto-wrap: continuity production failed: {e}")
+                else:
+                    _log("Auto-wrap: skipping continuity (no new nodes since last wrap)")
+
             umem.memory.session_wrap()
             # session_wrap() calls session_end() which calls save() internally,
             # so no additional umem.save() needed here.
@@ -1337,6 +1678,7 @@ def run_server(
         with _wrap_lock:
             if _session_wrapped[0]:
                 _session_wrapped[0] = False
+                _continuity_produced[0] = False  # Reset for new session
                 try:
                     umem.memory.session_start()
                 except Exception:
@@ -1432,6 +1774,7 @@ def run_server(
                 if tool_name == "session_wrap":
                     with _wrap_lock:
                         _session_wrapped[0] = True
+                    _continuity_produced[0] = True  # F2: prevent auto-wrap from overwriting
                 # Save after modifications (session_wrap saves internally, but
                 # add_memory/remove_memory need explicit save for vector index)
                 if tool_name in ("add_memory", "remove_memory", "encode_exchange"):

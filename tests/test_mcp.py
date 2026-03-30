@@ -31,7 +31,7 @@ class TestToolDefinitions:
             assert "inputSchema" in tool
 
     def test_tool_count(self):
-        assert len(TOOLS) == 16
+        assert len(TOOLS) == 19
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
@@ -42,6 +42,7 @@ class TestToolDefinitions:
             "remove_memory", "session_wrap", "memory_stats",
             "query_audit", "verify_audit", "explain_decision",
             "encode_exchange",
+            "think_deeper", "think_creative", "think_breakthrough",
         }
         assert names == expected
 
@@ -298,7 +299,7 @@ class TestMCPStdioProtocol:
             "jsonrpc": "2.0", "id": 2, "method": "tools/list",
         })
         tools = resp["result"]["tools"]
-        assert len(tools) == 17  # 16 verified + verify_integrity
+        assert len(tools) == 20  # 19 verified + verify_integrity
         names = {t["name"] for t in tools}
         assert "search_memory" in names
         assert "query_what_if" in names
@@ -484,6 +485,73 @@ class TestInputValidation:
         assert "error" not in result
         assert result["nodes_created"] == 1
 
+    def test_empty_problem_rejected_deeper(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_deeper", {"problem": ""})
+        assert "error" in result
+
+    def test_empty_problem_rejected_creative(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_creative", {"problem": "  "})
+        assert "error" in result
+
+    def test_empty_problem_rejected_breakthrough(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_breakthrough", {"problem": ""})
+        assert "error" in result
+
+
+class TestSessionWrapWithContinuity:
+    """Tests for session_wrap when ContinuityManager is configured."""
+
+    def test_session_wrap_produces_continuity(self):
+        """session_wrap should produce continuity metadata when manager is configured."""
+        import tempfile, os
+        from flowscript_agents.continuity import ContinuityManager
+
+        mock_llm = lambda p: "# Test — Memory\n\n## State\nTest\n\n## Patterns\nNone\n\n## Decisions\nNone\n\n## Context\nTest"
+        cont_mgr = ContinuityManager(llm=mock_llm, project_name="Test")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "agent.json")
+            umem = UnifiedMemory(file_path=mem_path)
+            umem.memory.session_start()
+            umem.memory.thought("test node")
+
+            handler = MCPHandler(umem, continuity_manager=cont_mgr, memory_path=mem_path)
+            result = handler.handle_tool("session_wrap", {})
+
+            assert "continuity" in result
+            assert result["continuity"]["produced"] is True
+            assert result["continuity"]["char_count"] > 0
+            assert os.path.exists(result["continuity"]["path"])
+
+    def test_session_wrap_continuity_failure_nonfatal(self):
+        """If continuity production fails, session_wrap should still succeed."""
+        import tempfile, os
+        from flowscript_agents.continuity import ContinuityManager
+
+        def failing_llm(prompt):
+            raise RuntimeError("LLM unavailable")
+
+        cont_mgr = ContinuityManager(llm=failing_llm, project_name="Test")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "agent.json")
+            umem = UnifiedMemory(file_path=mem_path)
+            umem.memory.session_start()
+            umem.memory.thought("test node")
+
+            handler = MCPHandler(umem, continuity_manager=cont_mgr, memory_path=mem_path)
+            result = handler.handle_tool("session_wrap", {})
+
+            # session_wrap should succeed even though continuity failed
+            assert "error" not in result
+            assert "nodes_before" in result
+            assert result["saved"] is True
+            # No continuity metadata since it failed
+            assert "continuity" not in result
+
 
 class TestVersionNegotiation:
     """Tests for MCP protocol version negotiation."""
@@ -568,6 +636,63 @@ class TestExplainDecision:
         assert result["audience"] == "general"
 
 
+class TestThinkingModes:
+    """Tests for think_deeper, think_creative, think_breakthrough tools."""
+
+    def test_think_deeper_returns_framework(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_deeper", {"problem": "Redis vs Postgres"})
+        assert "framework" in result
+        assert "First-Principles" in result["framework"]
+        assert "instruction" in result
+
+    def test_think_deeper_does_not_create_nodes(self):
+        """Thinking tools should NOT pollute the graph with placeholder nodes."""
+        handler, umem = _make_handler()
+        nodes_before = umem.memory.size
+        handler.handle_tool("think_deeper", {"problem": "Which cache layer?"})
+        assert umem.memory.size == nodes_before
+
+    def test_think_deeper_with_context(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_deeper", {
+            "problem": "Database choice",
+            "context": "Financial app with ACID requirements",
+        })
+        assert "Financial app" in result["context"]
+
+    def test_think_creative_returns_framework(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_creative", {"problem": "Scaling bottleneck"})
+        assert "framework" in result
+        assert "Assumption" in result["framework"]
+
+    def test_think_creative_with_attempts(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_creative", {
+            "problem": "Memory leak",
+            "attempts": "Tried profiling, no obvious leaks found",
+        })
+        assert "profiling" in result["context"]
+
+    def test_think_breakthrough_returns_combined_framework(self):
+        handler, _ = _make_handler()
+        result = handler.handle_tool("think_breakthrough", {"problem": "Architecture redesign"})
+        assert "framework" in result
+        # Should contain BOTH rigorous and creative elements
+        assert "Rigorous" in result["framework"] or "first principles" in result["framework"].lower()
+        assert "Creative" in result["framework"] or "assumption" in result["framework"].lower()
+
+    def test_thinking_tools_do_not_pollute_graph(self):
+        """All three thinking tools should leave the graph untouched."""
+        handler, umem = _make_handler()
+        nodes_before = umem.memory.size
+        handler.handle_tool("think_deeper", {"problem": "Caching strategy"})
+        handler.handle_tool("think_creative", {"problem": "User onboarding"})
+        handler.handle_tool("think_breakthrough", {"problem": "Scaling architecture"})
+        assert umem.memory.size == nodes_before
+
+
 class TestDescriptionIntegrity:
     """Tests for the three-layer MCP description integrity system."""
 
@@ -591,7 +716,7 @@ class TestDescriptionIntegrity:
         result = handler.handle_tool("verify_integrity", {})
         assert result["verdict"] == "PASS"
         assert result["count_match"] is True
-        assert result["tool_count"] == 16  # verified tools (not counting verify_integrity itself)
+        assert result["tool_count"] == 19  # verified tools (not counting verify_integrity itself)
 
     def test_verify_integrity_per_tool_status(self):
         """Each tool should have pass status with matching hashes."""
@@ -721,7 +846,7 @@ class TestAutoWrapTimer:
         assert session_wrap_tool is not None
         desc = session_wrap_tool["description"]
         assert "auto-wrap" in desc.lower()
-        assert "consolidation" in desc.lower()
+        assert "consolidat" in desc.lower()  # "consolidates" or "consolidation"
         assert "temporal tiers" in desc.lower() or "temporal" in desc.lower()
 
 
