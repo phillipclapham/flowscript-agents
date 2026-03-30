@@ -579,8 +579,8 @@ _TOOL_DEFS_RAW = [
             "returned framework to analyze your problem thoroughly — deconstruct to "
             "fundamentals, trace consequences across multiple orders, verify "
             "assumptions explicitly, and hold contradictions without premature "
-            "resolution. Key insights from your analysis will be saved to memory "
-            "as typed reasoning nodes."
+            "resolution. Call add_memory with key insights to save them as typed "
+            "reasoning nodes for future sessions."
         ),
         "inputSchema": {
             "type": "object",
@@ -607,7 +607,7 @@ _TOOL_DEFS_RAW = [
             "fundamentally different angle. Returns a creative exploration framework. "
             "After calling, challenge every assumption — what constraints are real vs "
             "inherited? What would the opposite approach look like? What patterns from "
-            "unrelated domains apply? Insights will be saved to memory."
+            "unrelated domains apply? Call add_memory to save breakthrough insights."
         ),
         "inputSchema": {
             "type": "object",
@@ -634,8 +634,8 @@ _TOOL_DEFS_RAW = [
             "with assumption-breaking for a two-pronged attack: systematic depth AND "
             "lateral thinking simultaneously. Use when the problem requires both "
             "understanding WHY current approaches fail AND imagining fundamentally "
-            "different solutions. Returns a comprehensive framework. Key insights "
-            "saved to memory."
+            "different solutions. Returns a comprehensive framework. Call add_memory "
+            "with key findings to persist insights across sessions."
         ),
         "inputSchema": {
             "type": "object",
